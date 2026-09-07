@@ -1,0 +1,18 @@
+package main
+
+proc drain(c <-chan int) {
+	c -> _
+	c -> _
+	println("drained")
+}
+
+func main() {
+	c := make(chan int)
+	par {
+		drain(c)
+		seq {
+			c <- 1
+			c <- 2
+		}
+	}
+}

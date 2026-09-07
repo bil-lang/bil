@@ -1,0 +1,18 @@
+package main
+
+proc mutate(p *int) {
+	*p = 42
+}
+
+proc other() {
+	println("hi")
+}
+
+func main() {
+	x := 0
+	par {
+		mutate(&x)
+		other()
+	}
+	println(x)
+}

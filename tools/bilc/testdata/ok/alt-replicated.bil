@@ -1,0 +1,22 @@
+package main
+
+proc sender(b chan<- int) {
+	b <- 42
+}
+
+func main() {
+	a := make(chan int)
+	b := make(chan int)
+	c := make(chan int)
+	chans := []chan int{a, b, c}
+	par {
+		sender(b)
+		seq {
+			alt j := range 3 {
+				chans[j] -> v {
+					println(j, v)
+				}
+			}
+		}
+	}
+}

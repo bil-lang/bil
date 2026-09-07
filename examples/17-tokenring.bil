@@ -1,0 +1,32 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package main
+
+const nNodes = 4
+const rounds = 2
+
+proc node(id int, in <-chan int, out chan<- int) {
+	if id == 0 {
+		out <- 0
+	}
+	for r := range rounds {
+		var token int
+		in -> token
+		println("node", id, "token", token)
+		if id == 0 && r == rounds-1 {
+			continue
+		}
+		token++
+		out <- token
+	}
+}
+
+func main() {
+	ring := makeChans[int](nNodes)
+	
+	par i := range nNodes {
+		node(i, ring[(i+nNodes-1)%nNodes], ring[i])
+	}
+}

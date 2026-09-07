@@ -1,0 +1,46 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package main
+
+const nClients = 3
+const maxCount = 2
+const cycles = 2
+
+proc client(id int, sem chan<- bool) {
+	for range cycles {
+		sem <- true
+		sem <- true
+	}
+}
+
+proc semaphore(chans []chan bool) {
+	count := maxCount
+	held := make([]bool, nClients)
+	for range nClients * cycles * 2 {
+		alt i := range nClients {
+			(held[i] || count > 0) && chans[i] -> _ {
+				if held[i] {
+					held[i] = false
+					count++
+					println("RELEASE", i)
+				} else {
+					held[i] = true
+					count--
+					println("ACQUIRE", i)
+				}
+			}
+		}
+	}
+}
+
+func main() {
+	chans := makeChans[bool](nClients)
+	par {
+		par i := range nClients {
+			client(i, chans[i])
+		}
+		semaphore(chans)
+	}
+}

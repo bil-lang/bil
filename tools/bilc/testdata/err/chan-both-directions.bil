@@ -1,0 +1,15 @@
+package main
+
+proc looper(c chan int) {
+	c <- 1
+	var x int
+	c -> x
+	println(x)
+}
+
+func main() {
+	c := make(chan int)
+	par {
+		looper(c)
+	}
+}

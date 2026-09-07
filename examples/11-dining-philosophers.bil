@@ -1,0 +1,45 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package main
+
+const n = 5
+const meals = 2
+
+proc fork(acquire <-chan int, release <-chan int) {
+	for range 2 * meals {
+		acquire -> _
+		release -> _
+	}
+}
+
+proc philosopher(id int, reversed bool, leftAcquire  chan<- int, leftRelease  chan<- int, 
+										rightAcquire chan<- int, rightRelease chan<- int) {
+	for range meals {
+		if reversed {
+			rightAcquire <- 0
+			leftAcquire <- 0
+		} else {
+			leftAcquire <- 0
+			rightAcquire <- 0
+		}
+		println(id, "eating")
+		leftRelease <- 0
+		rightRelease <- 0
+	}
+}
+
+func main() {
+	acquire := makeChans[int](n)
+	release := makeChans[int](n)
+
+	par {
+		par i := range n {
+			fork(acquire[i], release[i])
+		}
+		par i := range n {
+			philosopher(i, i == n-1, acquire[i], release[i], acquire[(i+1)%n], release[(i+1)%n])
+		}
+	}
+}

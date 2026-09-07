@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Build bilc and static_check, transpile a .bil file, and run static_check
+# on the transformed Go. Usage: tools/static_check-run examples/01-twoprocs.bil
+set -euo pipefail
+
+if [ "$#" -ne 1 ]; then
+	echo "usage: static_check-run <file.bil>" >&2
+	exit 2
+fi
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bilc_dir="$script_dir/bilc"
+static_check_dir="$script_dir/static_check"
+src="$1"
+
+(cd "$bilc_dir" && go build -o bilc .)
+(cd "$static_check_dir" && go build -o static_check .)
+
+out="$(mktemp -t bilc-out).go"
+trap 'rm -f "$out"' EXIT
+
+"$bilc_dir/bilc" "$src" "$out"
+"$static_check_dir/static_check" "$out"

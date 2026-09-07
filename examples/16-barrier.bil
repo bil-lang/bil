@@ -1,0 +1,38 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package main
+
+const nWorkers = 3
+const rounds = 3
+
+proc worker(id int, arrive chan<- bool, release <-chan bool) {
+	for r := range rounds {
+		println("worker", id, "round", r)
+		arrive <- true
+		release -> _
+	}
+}
+
+proc barrier(arrive []chan bool, release []chan bool) {
+	for range rounds {
+		for i := range nWorkers {
+			arrive[i] -> _
+		}
+		for i := range nWorkers {
+			release[i] <- true
+		}
+	}
+}
+
+func main() {
+	arrive := makeChans[bool](nWorkers)
+	release := makeChans[bool](nWorkers)
+	par {
+		par i := range nWorkers {
+			worker(i, arrive[i], release[i])
+		}
+		barrier(arrive, release)
+	}
+}

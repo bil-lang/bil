@@ -1,0 +1,24 @@
+package main
+
+proc worker(c chan<- int, v int) {
+	c <- v
+}
+
+func main() {
+	cs := makeChans[int](3)
+
+	par {
+		par i := range 3 {
+			worker(cs[i], i+1)
+		}
+		seq {
+			var v int
+			cs[0] -> v
+			println(v)
+			cs[1] -> v
+			println(v)
+			cs[2] -> v
+			println(v)
+		}
+	}
+}

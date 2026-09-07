@@ -1,0 +1,67 @@
+package main
+
+type Point struct {
+	X, Y int
+}
+
+type LogMsg interface {
+	isLogMsg()
+}
+
+type Info struct {
+	Code int
+}
+
+func (Info) isLogMsg() {}
+
+type Warn struct {
+	Code int
+}
+
+func (Warn) isLogMsg() {}
+
+proc pointSender(out chan<- Point) {
+	out <- Point{X: 1, Y: 2}
+	out <- Point{X: 3, Y: 4}
+}
+
+proc pointReceiver(in <-chan Point) {
+	var p Point
+	for range 2 {
+		in -> p
+		println(p.X, p.Y)
+	}
+}
+
+proc logSender(out chan<- LogMsg) {
+	out <- Info{Code: 1}
+	out <- Warn{Code: 2}
+	out <- Info{Code: 3}
+}
+
+proc logReceiver(in <-chan LogMsg) {
+	for range 3 {
+		in -> case v {
+			Info {
+				println("info", v.Code)
+			}
+			Warn {
+				println("warn", v.Code)
+			}
+		}
+	}
+}
+
+func main() {
+	points := make(chan Point)
+	par {
+		pointSender(points)
+		pointReceiver(points)
+	}
+
+	logs := make(chan LogMsg)
+	par {
+		logSender(logs)
+		logReceiver(logs)
+	}
+}

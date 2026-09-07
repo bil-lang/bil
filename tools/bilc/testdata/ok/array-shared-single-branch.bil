@@ -1,0 +1,13 @@
+package main
+
+proc reader(data []int) {
+	println(data[0])
+	println(data[1])
+}
+
+func main() {
+	data := []int{10, 20, 30}
+	par {
+		reader(data)
+	}
+}

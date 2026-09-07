@@ -1,0 +1,36 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package main
+
+const n = 4
+
+proc worker(chunk []int, result chan<- int) {
+	sum := 0
+	for _, v := range chunk {
+		sum += v
+	}
+	result <- sum
+}
+
+func main() {
+	data := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+	chunks := splitN(data, n)
+	results := makeChans[int](n)
+
+	par {
+		par i := range n {
+			worker(chunks[i], results[i])
+		}
+		seq {
+			total := 0
+			for i := range n {
+				var partial int
+				results[i] -> partial
+				total += partial
+			}
+			println(total)
+		}
+	}
+}

@@ -1,0 +1,33 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package main
+
+const N = 3
+
+proc worker(in <-chan int, out chan<- int) {
+	var x int
+	
+	in -> x
+	out <- x * x
+}
+
+func main() {
+	toWorker := makeChans[int](N)
+	fmWorker := makeChans[int](N)
+
+	par {
+		par i := range N {
+			worker(toWorker[i], fmWorker[i])
+		}
+		seq {
+			for i := range N {
+				toWorker[i] <- i + 1
+			}
+			for i := range N {
+				println( <- fmWorker[i] )
+			}
+		}
+	}
+}

@@ -1,0 +1,33 @@
+Bil is an independent implementation. It does not incorporate source
+code from KRoC, INMOS occam, or any GPL/LGPL-licensed project.
+
+Go
+--
+Bil's syntax, module/build conventions, and the `tools/bilc`
+preprocessor build directly on the Go programming language and its
+toolchain (https://go.dev). Bil expects to incorporate a modified
+fork of Go's AST/parser layer (in the manner of TinyGo) as the
+language frontend matures; any Go source vendored into this repo
+retains its original Go copyright header and is governed by the terms
+below, reproduced in LICENSE-GO.
+
+  Copyright 2009 The Go Authors.
+  Licensed under the BSD 3-Clause license; see LICENSE-GO.
+
+occam and CSP
+-------------
+Bil's concurrency model -- unbuffered rendezvous channels, no shared
+mutable memory between concurrent processes, and the par/seq/alt/
+proc/stop vocabulary -- is a direct descendant of occam and the
+Communicating Sequential Processes (CSP) formalism it implements. No
+occam or KRoC source code is used; the influence is conceptual and
+terminological, drawn from the published language design and theory:
+
+  * C.A.R. Hoare, "Communicating Sequential Processes" (1978/1985)
+  * INMOS Limited, "occam 2 Reference Manual" (1988)
+  * A.W. Roscoe, "The Theory and Practice of Concurrency" (1997)
+  * P.H. Welch et al., Communicating Process Architectures (WoTUG/CPA)
+  * KRoC (Kent Retargetable occam Compiler), University of Kent --
+    cited as prior art / related work only. KRoC is licensed GPL v2+
+    (tools) / LGPL v2+ (libraries); no KRoC code is incorporated into
+    Bil, and none of its copyleft terms apply here.

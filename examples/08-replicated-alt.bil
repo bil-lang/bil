@@ -1,0 +1,35 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package main
+
+const nClients = 3
+const perClient = 2
+
+proc client(id int, out chan<- int) {
+	for i := range perClient {
+		out <- id*100 + i
+	}
+}
+
+proc server(chans []chan int) {
+	for range nClients * perClient {
+		alt j := range nClients {
+			chans[j] -> v {
+				println(v)
+			}
+		}
+	}
+}
+
+func main() {
+	chans := makeChans[int](nClients)
+	
+	par {
+		par i := range nClients {
+			client(i, chans[i])
+		}
+		server(chans)
+	}
+}

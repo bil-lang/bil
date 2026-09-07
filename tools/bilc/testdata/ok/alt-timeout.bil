@@ -1,0 +1,15 @@
+package main
+
+import "time"
+
+proc waiter() {
+	alt {
+		<-time.After(10 * time.Millisecond) {
+			println("timeout")
+		}
+	}
+}
+
+func main() {
+	waiter()
+}

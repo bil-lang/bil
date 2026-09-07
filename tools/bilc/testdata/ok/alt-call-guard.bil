@@ -1,0 +1,17 @@
+package main
+
+import "context"
+
+proc watcher(ctx context.Context) {
+	alt {
+		ctx -> Done() {
+			println("cancelled")
+		}
+	}
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	watcher(ctx)
+}

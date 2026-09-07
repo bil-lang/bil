@@ -1,0 +1,30 @@
+package main
+
+import "context"
+
+proc watcher(ctx context.Context, allow bool, c <-chan int) {
+	var v int
+	for range 2 {
+		alt {
+			(allow) && ctx -> Done() {
+				println("cancelled")
+			}
+			(true) && c -> v {
+				println("got", v)
+			}
+		}
+	}
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c := make(chan int)
+	par {
+		watcher(ctx, false, c)
+		seq {
+			c <- 1
+			c <- 2
+		}
+	}
+}

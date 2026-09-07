@@ -1,0 +1,25 @@
+package main
+
+proc sender(ch chan<- int, v int) {
+	ch <- v
+}
+
+func main() {
+	a := make(chan int)
+	b := make(chan int)
+	c := make(chan int)
+	chans := []chan int{a, b, c}
+	guards := []bool{false, true, false}
+	par {
+		sender(a, 1)
+		sender(b, 2)
+		seq {
+			alt j := range 3 {
+				(guards[j]) && chans[j] -> v {
+					println(j, v)
+				}
+			}
+			a -> _
+		}
+	}
+}

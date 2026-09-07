@@ -1,0 +1,30 @@
+package main
+
+proc onlyC(a <-chan int, b <-chan int, c <-chan int) {
+	for range 2 {
+		pri alt {
+			a -> _ {
+				println("a")
+			}
+			b -> _ {
+				println("b")
+			}
+			c -> _ {
+				println("c")
+			}
+		}
+	}
+}
+
+func main() {
+	a := make(chan int)
+	b := make(chan int)
+	c := make(chan int)
+	par {
+		onlyC(a, b, c)
+		seq {
+			c <- 1
+			c <- 2
+		}
+	}
+}

@@ -1,0 +1,103 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+//
+// A real Bil program running on the WASM-worker grid emulator
+// (../../emulator, a sibling repo — see its README and
+// STRATEGY.md's "Emulator architecture" note): a counter ripples
+// east along each row, reflects at the last column, and ripples
+// back west. Every node runs this exact same proc, discovering its
+// own position and neighbours via the bilink package rather than
+// being told them — bilink.Row/Col/NumCols read state the emulator's
+// Worker bootstrap sets before this program starts.
+//
+// `link` is Bil's reserved index-addressed array of nearest-neighbour
+// links — not an ordinary channel, so `link[i] -> x` / `link[i] <- v`
+// compile to a genuine cross-Worker rendezvous (bilink.Recv/Send), not
+// an in-process Go channel op. north/east/south/west below are just
+// this program's own choice of names for indices 0-3 — that mapping
+// is a convention owned entirely by the emulator's topology layer
+// (../../emulator/static/index.html's buildTopology), not by bilc or
+// bilink; a different topology would pick different names, or none.
+// This mirrors ../../emulator/nodeprog/ripple/main.go, the
+// hand-written Go version of this same demo built during the
+// emulator's Phase A, now running as real compiled Bil instead.
+
+package main
+
+import "time"
+
+const (
+	north = 0
+	east  = 1
+	south = 2
+	west  = 3
+)
+
+const waves = 3
+
+// hopDelay is purely cosmetic -- the rendezvous itself already
+// enforces correct pacing (both sides must be present), this just
+// makes the ripple visible to a human watching the grid rather than
+// resolving instantly.
+const hopDelay = 150 * time.Millisecond
+
+proc node() {
+	r, c := bilink.Row(), bilink.Col()
+	cols := bilink.NumCols()
+
+	bilink.Screenf("(%d,%d) ready", r, c)
+
+	if cols < 2 {
+		bilink.Screenf("(%d,%d) single column, nothing to ripple", r, c)
+		stop
+	}
+
+	for wave := 0; wave < waves; wave++ {
+		if c == 0 {
+			// originate the wave east, then await its reflection back via the same link
+			time.Sleep(hopDelay)
+			bilink.Screenf("wave %d: send east = %d", wave, wave)
+			link[east] <- int32(wave)
+			var v int32
+			link[east] -> v
+			bilink.Screenf("wave %d: reflected back = %d", wave, v)
+		} else if c == cols-1 {
+			// last column: receive, then reflect straight back west
+			var v int32
+			link[west] -> v
+			bilink.Screenf("wave %d: got %d, reflecting", wave, v)
+			time.Sleep(hopDelay)
+			link[west] <- v
+		} else {
+			// middle: forward the wave east, then forward its reflection west
+			var v int32
+			link[west] -> v
+			bilink.Screenf("wave %d: got %d, forward east", wave, v)
+			time.Sleep(hopDelay)
+			link[east] <- v
+
+			var v2 int32
+			link[east] -> v2
+			bilink.Screenf("wave %d: reflection %d, forward west", wave, v2)
+			time.Sleep(hopDelay)
+			link[west] <- v2
+		}
+	}
+
+	bilink.Screenf("(%d,%d) done, %d waves complete", r, c, waves)
+	stop
+}
+
+// One Worker == one grid node (see static/index.html's buildTopology
+// and node-worker.js in the emulator repo) -- the emulator spawns and
+// positions all NxM instances itself, so this program's job is only to
+// run the single node it's told it is via bilink.Row/Col, once. It
+// must NOT enumerate the grid itself (no `par`/`par range` here): a
+// replicated par would spawn N*M goroutines *within this one Worker*,
+// all reading the same bilRow/bilCol and racing on the same link
+// buffers -- confirmed by hitting exactly that bug (every node's
+// screen showing 2-4x duplicated output) before landing on this.
+func main() {
+	node()
+}

@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Build bilc, transpile a .bil file to Go, run static analysis on the
+# result, and run it — refusing to run on a violation.
+# Usage: tools/bilc-run examples/01-twoprocs.bil
+set -euo pipefail
+
+if [ "$#" -ne 1 ]; then
+	echo "usage: bilc-run <file.bil>" >&2
+	exit 2
+fi
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bilc_dir="$script_dir/bilc"
+static_check_dir="$script_dir/static_check"
+src="$1"
+
+(cd "$bilc_dir" && go build -o bilc .)
+(cd "$static_check_dir" && go build -o static_check .)
+
+out="$(mktemp -t bilc-out).go"
+trap 'rm -f "$out"' EXIT
+
+"$bilc_dir/bilc" "$src" "$out"
+
+if ! "$static_check_dir/static_check" "$out"; then
+	echo >&2
+	echo "bilc-run: static analysis failed for $src — not running (see violation(s) above; positions refer to the transpiled Go, not the .bil source)" >&2
+	exit 1
+fi
+
+go run "$out"

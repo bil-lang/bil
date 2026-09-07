@@ -1,0 +1,90 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package main
+
+import "fmt"
+
+const width = 44
+const height = 22
+const pixels = width * height
+const nWorkers = 3
+const maxIter = 30
+const done = -1
+const ramp = " .:-=+*#%@"
+
+proc worker(id int, xmin, xmax, ymin, ymax float64, assign <-chan int, result chan<- int) {
+	var idx int
+	assign -> idx
+	for idx != done {
+		x := idx % width
+		y := idx / width
+		cx := xmin + float64(x)*(xmax-xmin)/float64(width-1)
+		cy := ymin + float64(y)*(ymax-ymin)/float64(height-1)
+		zx, zy := 0.0, 0.0
+		iter := 0
+		for iter < maxIter && zx*zx+zy*zy < 4.0 {
+			zx, zy = zx*zx-zy*zy+cx, 2.0*zx*zy+cy
+			iter++
+		}
+		result <- iter
+		assign -> idx
+	}
+}
+
+proc farmer(assign, result []chan int) {
+	image := make([]int, pixels)
+	assigned := make([]int, nWorkers)
+	next := 0
+	for w := range nWorkers {
+		assigned[w] = next
+		assign[w] <- next
+		next++
+	}
+	for range pixels {
+		alt w := range nWorkers {
+			result[w] -> val {
+				image[assigned[w]] = val
+				if next < pixels {
+					assigned[w] = next
+					assign[w] <- next
+					next++
+				} else {
+					assign[w] <- done
+				}
+			}
+		}
+	}
+	for y := range height {
+		row := make([]byte, width)
+		for x := range width {
+			iter := image[y*width+x]
+			bucket := iter * (len(ramp) - 1) / maxIter
+			row[x] = ramp[bucket]
+		}
+		println(string(row))
+	}
+}
+
+func main() {
+	var xmin, xmax, ymin, ymax float64
+	fmt.Print("xmin (full view -2.0): ")
+	fmt.Scan(&xmin)
+	fmt.Print("xmax (full view 1.0): ")
+	fmt.Scan(&xmax)
+	fmt.Print("ymin (full view -1.5): ")
+	fmt.Scan(&ymin)
+	fmt.Print("ymax (full view 1.5): ")
+	fmt.Scan(&ymax)
+	fmt.Println()
+
+	assign := makeChans[int](nWorkers)
+	result := makeChans[int](nWorkers)
+	par {
+		par w := range nWorkers {
+			worker(w, xmin, xmax, ymin, ymax, assign[w], result[w])
+		}
+		farmer(assign, result)
+	}
+}

@@ -1,0 +1,20 @@
+package main
+
+proc echoer(c <-chan int) {
+	var x int
+	alt {
+		c -> x {
+			println(x)
+		}
+	}
+}
+
+func main() {
+	c := make(chan int)
+	par {
+		echoer(c)
+		seq {
+			c <- 7
+		}
+	}
+}

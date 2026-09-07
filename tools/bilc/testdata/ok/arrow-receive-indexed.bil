@@ -1,0 +1,29 @@
+package main
+
+const N = 3
+
+proc worker(in <-chan int, out chan<- int) {
+	x := <-in
+	out <- x * x
+}
+
+func main() {
+	toWorker := makeChans[int](N)
+	fromWorker := makeChans[int](N)
+
+	par {
+		par i := range N {
+			worker(toWorker[i], fromWorker[i])
+		}
+		seq {
+			for i := range N {
+				toWorker[i] <- i + 1
+			}
+			for i := range N {
+				var r int
+				fromWorker[i] -> r
+				println(r)
+			}
+		}
+	}
+}

@@ -1,0 +1,16 @@
+package main
+
+type Message struct {
+	Body string
+}
+
+proc sender(out chan<- *Message) {
+	out <- &Message{Body: "hi"}
+}
+
+func main() {
+	m := make(chan *Message)
+	par {
+		sender(m)
+	}
+}

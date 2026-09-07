@@ -1,0 +1,26 @@
+package main
+
+proc worker(chunk []int, out chan<- int) {
+	sum := 0
+	for _, v := range chunk {
+		sum += v
+	}
+	out <- sum
+}
+
+func main() {
+	data := []int{1, 2, 3, 4}
+	chunks := splitN(data, 2)
+	left := make(chan int)
+	right := make(chan int)
+	par {
+		worker(chunks[0], left)
+		worker(chunks[1], right)
+		seq {
+			var l, r int
+			left -> l
+			right -> r
+			println(l + r)
+		}
+	}
+}

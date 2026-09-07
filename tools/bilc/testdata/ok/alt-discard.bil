@@ -1,0 +1,19 @@
+package main
+
+proc waiter(c <-chan bool) {
+	alt {
+		c -> _ {
+			println("done")
+		}
+	}
+}
+
+func main() {
+	c := make(chan bool)
+	par {
+		waiter(c)
+		seq {
+			c <- true
+		}
+	}
+}

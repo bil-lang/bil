@@ -1,0 +1,46 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package main
+
+import "time"
+
+const total = 5
+
+proc highSender(high chan<- int) {
+	for i := range total {
+		high <- i
+	}
+}
+
+proc lowSender(low chan<- int) {
+	for i := range total {
+		low <- i
+	}
+}
+
+proc server(high <-chan int, low <-chan int) {
+	for range 2 * total {
+		time.Sleep(5 * time.Millisecond)
+		pri alt {
+			high -> _ {
+				println("high")
+			}
+			low -> _ {
+				println("low")
+			}
+		}
+	}
+}
+
+func main() {
+	high := make(chan int)
+	low := make(chan int)
+	
+	par {
+		server(high, low)
+		highSender(high)
+		lowSender(low)
+	}
+}

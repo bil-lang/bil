@@ -1,0 +1,41 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package main
+
+const N = 10
+const limit = 30
+
+proc generator(out chan<- int) {
+	for v := 2; v <= limit; v++ {
+		out <- v
+	}
+	stop
+}
+
+proc filter(in <-chan int, out chan<- int) {
+	
+	var prime, v int
+	seq {
+		in -> prime
+		println(prime)
+		for {
+			in -> v
+			if v%prime != 0 {
+				out <- v
+			}
+		}
+	}
+}
+
+func main() {
+	c := makeChans[int](N + 1)
+
+	par {
+		generator(c[0])
+		par i := range N {
+			filter(c[i], c[i+1])
+		}
+	}
+}

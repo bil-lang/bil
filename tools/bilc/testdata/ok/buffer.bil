@@ -1,0 +1,51 @@
+package main
+
+const capacity = 2
+const total = 7
+
+proc buffer(in <-chan int, request <-chan int, out chan<- int) {
+	var queue []int
+	var v int
+	var emitted = 0
+
+	for emitted < total {
+		alt {
+			(len(queue) < capacity) && in -> v {
+				queue = append(queue, v)
+			}
+			(len(queue) > 0) && request -> _ {
+				out <- queue[0]
+				queue = queue[1:]
+				emitted++
+			}
+		}
+	}
+}
+
+proc producer(in chan<- int) {
+	for v := range total {
+		in <- v + 1
+	}
+}
+
+proc consumer(request chan<- int, out <-chan int) {
+	var v int
+
+	for range total {
+		request <- 0
+		out -> v
+		println(v)
+	}
+}
+
+func main() {
+	in := make(chan int)
+	request := make(chan int)
+	out := make(chan int)
+
+	par {
+		buffer(in, request, out)
+		producer(in)
+		consumer(request, out)
+	}
+}

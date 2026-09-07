@@ -1,0 +1,42 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package main
+
+import "time"
+
+proc poller(c <-chan int) {
+	var x int
+	for {
+		alt {
+			c -> x {
+				if x >= 0 {
+					println(x)
+				} else {
+					stop
+				}
+			}
+			skip {
+				println("skip")
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+proc sender(c chan<- int) {
+	time.Sleep(150 * time.Millisecond)
+	c <- 42
+	time.Sleep(150 * time.Millisecond)
+	c <- -1
+}
+
+func main() {
+	c := make(chan int)
+
+	par {
+		poller(c)
+		sender(c)
+	}
+}
