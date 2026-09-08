@@ -1,6 +1,11 @@
+---
+layout: default
+title: The Bil Guide
+---
+
 <a id="top"></a>
 
-# The Bil Language
+# The Bil Guide
 
 ## Overview
 
