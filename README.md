@@ -2,18 +2,34 @@
 
 **Bil** is a variant of Go that adds language and runtime support for parallel processors, see `LANG-DESIGN.md` for an introduction to the Bil language, expressed as worked examples.
 
+## Install
+
+```
+curl -fsSL https://bil-lang.org/install.sh | sh
+```
+
+On Windows (PowerShell):
+
+```
+irm https://bil-lang.org/install.ps1 | iex
+```
+
+Either installs a prebuilt `bil` binary for your platform. `bil run` additionally needs a Go toolchain on `PATH` at runtime (it transpiles `.bil` to Go and hands off to `go run` — see below); `bil vet` doesn't. Get Go from https://go.dev/dl/ if you don't already have it. To build from source instead, see "Running an example" below.
+
 ## Running an example
 
-Build the `bil` tool once:
+If you installed `bil` via the script above, it's already on your `PATH`. To build it from source instead:
 
 ```
 cd tools/bil && go build -o bil . && cd ../..
 ```
 
-Then run a `.bil` file with:
+(the examples below assume `bil` is on `PATH`; if you built from source without moving the binary, run `tools/bil/bil` in its place)
+
+Run a `.bil` file with:
 
 ```
-tools/bil/bil run examples/01-twoprocs.bil
+bil run examples/01-twoprocs.bil
 ```
 
 `bil run` chains together Bil's two internal tools, failing at the first step that doesn't pass rather than running anything it hasn't checked:

@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    runs-on: ubuntu-latest
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.0"
+
+      - name: Build
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME}"
+          out="bil"
+          [ "${{ matrix.goos }}" = "windows" ] && out="bil.exe"
+
+          mkdir -p "dist/${{ matrix.goos }}_${{ matrix.goarch }}"
+          go build -o "dist/${{ matrix.goos }}_${{ matrix.goarch }}/$out" ./tools/bil
+
+          cp LICENSE LICENSE-GO NOTICE "dist/${{ matrix.goos }}_${{ matrix.goarch }}/"
+
+          name="bil_${version}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          cd "dist/${{ matrix.goos }}_${{ matrix.goarch }}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip -q "../${name}.zip" .
+          else
+            tar czf "../${name}.tar.gz" .
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bil_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          set -eu
+          cd dist
+          sha256sum bil_*.tar.gz bil_*.zip > "bil_${GITHUB_REF_NAME}_checksums.txt"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/bil_*.tar.gz
+            dist/bil_*.zip
+            dist/bil_*_checksums.txt
+          generate_release_notes: true
