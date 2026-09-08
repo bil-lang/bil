@@ -952,32 +952,6 @@ flowchart TB
 
 ---
 
-### Next
-
-- back to placement work
-  - define placement interface
-  - add mesh example to docs
-  - change the way link is used in mesh.bil code
-  - consider need for 3 repos (bil & emu & website)
-
-### Snagging
-
-- search for `occam`
-- docs in general (rename LANG-DESIGN.md)
-- website
-
-### Roadmap
-
-- make a real bil run/bil check subcommand CLI
-- Arbitrary I/O — fmt.Println, file/network access, os.Exit, panics: nothing in the plan inspects these at all... maybe allow in single par branch?
-- Cross-file or cross-package calls — walkPurity's recursion only resolves callees found via funcDecls on the single parsed file; a call into another file in the same package, or into an imported package, silently stops there (same "skip, don't flag" stance the rest of static_check already takes for unresolvable calls).
-- Mutation reached through a return value rather than a parameter — e.g. a value func calls a helper that returns a slice/struct sharing backing storage with global state, then mutates through that; nothing traces that path since it isn't a parameter or a direct free-variable assignment.
-
-### Decided but not yet built
-
-- **`PLACED PAR` will require chan-only params** (plus by-value scalars) — deliberately stricter than real occam (which permits `VAL` array abbreviation across a placement boundary via compiler-inserted transfer). Not implemented — `PLACED PAR` doesn't exist as a construct yet.
-- **`tools/static_check` needs module-aware import resolution once `bilc`'s output actually depends on the sibling `../emulator` repo** (per `STRATEGY.md`'s "Implementation lives in a sibling repo, `../emulator`... depends on `tools/bilc` (one-directional) once real `.bil` programs run on the array"). Today `static_check`'s importer (`importer.ForCompiler(fset, "source", nil)`, `tools/static_check/main.go`) only sees GOROOT's stdlib source — it can't resolve any import outside the standard library, which is already why `examples/19-mesh-ripple.bil` (imports `emulator/nodeprog/bilink`) fails `tools/bilc-run`'s static-analysis step even though plain `bilc` + `go run` still runs it fine. Fixing this needs two things together: (1) the transpiled file needs a real module context to resolve from — `bilc-run` currently writes it to a bare temp file with no `go.mod` at all, so nothing to anchor a resolver on; likely a generated `go.mod` alongside it with a `replace` pointing at `../emulator`; (2) swap the importer for something module-aware — `golang.org/x/tools/go/packages` is the standard fit, shelling out to the real `go` command for fully resolved type info — a new external dependency, deliberately avoided in the spike that built `static_check` to keep it stdlib-only with no network/module-fetch requirement. Not urgent — planning-ahead note, not blocking anything today.
-
 <a id="section-iv"></a>
 
 ## Section IV: Further Bil
