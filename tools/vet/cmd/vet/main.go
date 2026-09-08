@@ -9,6 +9,8 @@ import (
 )
 
 func main() {
+	vet.EnsureGOROOT()
+
 	if len(os.Args) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: vet <file.go>")
 		os.Exit(2)

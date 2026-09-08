@@ -20,6 +20,8 @@ func usage() {
 }
 
 func main() {
+	vet.EnsureGOROOT()
+
 	if len(os.Args) != 3 {
 		usage()
 		os.Exit(2)
