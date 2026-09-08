@@ -1,0 +1,23 @@
+package main
+
+func main() {
+
+	c := make(chan int)
+
+	par {
+		seq {
+			c <- 42
+			c <- 99
+		}
+		seq {
+			var x, y int
+
+			c -> x
+			c -> y
+
+			println(x)
+			println(y)
+		}
+	}
+
+}

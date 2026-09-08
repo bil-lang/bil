@@ -1,6 +1,7 @@
-// bilc is a source-to-source preprocessor: it reads a .bil file (Go plus the
-// `par`, `seq`, and `proc` constructs) and emits legal, compilable Go.
-package main
+// Package bilc is a source-to-source preprocessor: it reads a .bil file (Go
+// plus the `par`, `seq`, and `proc` constructs) and emits legal, compilable
+// Go.
+package bilc
 
 import (
 	"bytes"
@@ -8,7 +9,6 @@ import (
 	"go/format"
 	"go/scanner"
 	"go/token"
-	"os"
 )
 
 type tok struct {
@@ -393,7 +393,7 @@ func (t *transformer) paramNamesAndDirections(lo, hi int) (names []string, dirs 
 // channel parameter or free channel may not be used for both input and
 // output within the same procedure — distinct from, and not covered by,
 // the point-to-point rule (enforced downstream by
-// tools/static_check/channels.go), which only ever compares usage *across*
+// tools/vet/channels.go), which only ever compares usage *across*
 // `par` branches. This one is purely local: for each `proc`, for each of
 // its own *undirected* `chan T` parameters (a directional `<-chan
 // T`/`chan<- T` already can't be misused this way — Go's own compiler
@@ -1540,25 +1540,4 @@ func (t *transformer) hasImport(path string) bool {
 		}
 	}
 	return false
-}
-
-func main() {
-	if len(os.Args) != 3 {
-		fmt.Fprintln(os.Stderr, "usage: bilc source.bil source.go")
-		os.Exit(2)
-	}
-	src, err := os.ReadFile(os.Args[1])
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	out, err := Transform(src)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "transform error:", err)
-		os.Exit(1)
-	}
-	if err := os.WriteFile(os.Args[2], out, 0o644); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
 }

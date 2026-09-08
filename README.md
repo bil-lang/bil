@@ -4,17 +4,25 @@
 
 ## Running an example
 
-Run a `.bil` file with:
+Build the `bil` tool once:
 
 ```
-tools/bilc-run examples/01-twoprocs.bil
+cd tools/bil && go build -o bil . && cd ../..
 ```
 
-This builds and chains together the two Bil tools (`bilc` and `static_check`), failing at the first step that doesn't pass rather than running anything it hasn't checked:
+Then run a `.bil` file with:
+
+```
+tools/bil/bil run examples/01-twoprocs.bil
+```
+
+`bil run` chains together Bil's two internal tools, failing at the first step that doesn't pass rather than running anything it hasn't checked:
 
 1. **`tools/bilc`** — a source-to-source preprocessor (a _transpiler_) that uses `go/scanner` and `go/token` to parse Bil code, apply certain heuristic rules and to provide a set of helper functions. Finally, it uses `go/format` to translate the `.bil` file into legal Go.
-2. **`tools/static_check`** — a `go/ast`/`go/types`-based static analyzer that checks the transpiled Go against Bil's usage rules (for example: a channel may only be used for input in one `par` branch, and output in one other). A violation is reported and the program is **not** run; positions currently point at the transpiled Go, not the `.bil` source, since `bilc` doesn't emit a source map back yet.
+2. **`tools/vet`** — a `go/ast`/`go/types`-based static analyzer that checks the transpiled Go against Bil's usage rules (for example: a channel may only be used for input in one `par` branch, and output in one other). A violation is reported and the program is **not** run; positions currently point at the transpiled Go, not the `.bil` source, since `bilc` doesn't emit a source map back yet.
 3. Only if that passes: calls `go run` on the transpiled Go.
+
+To run steps 1–2 only, without executing the program, use `bil vet` instead of `bil run`.
 
 ## Running tests
 
@@ -25,7 +33,9 @@ go test ./...
 
 This runs `tools/bilc/bilc_test.go` against the fixtures in `tools/bilc/testdata/`: `ok/*.bil` files are transpiled, run, and checked against a matching `*.golden` file; `err/*.bil` files are checked to fail with an error containing the matching `*.err` file's text. To add a regression test, drop a new `.bil` + `.golden` (or `.err`) pair into the right directory — no test code to touch.
 
-`ok/*.bil` fixtures need deterministic output, since they're checked with an exact string match. An example whose output is inherently timing-dependent (e.g. `examples/03-server-alt.bil`, which races a timer against a sleep) is deliberately left out of `testdata/`, and is only meant to be run manually via `tools/bilc-run`.
+`ok/*.bil` fixtures need deterministic output, since they're checked with an exact string match. An example whose output is inherently timing-dependent (e.g. `examples/03-server-alt.bil`, which races a timer against a sleep) is deliberately left out of `testdata/`, and is only meant to be run manually via `bil run`.
+
+`tools/vet` and `tools/bil` have their own `go test ./...` suites, run the same way from within each directory.
 
 ## Editor support
 

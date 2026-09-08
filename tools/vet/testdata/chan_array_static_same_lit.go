@@ -1,6 +1,6 @@
 // Two branches both send to the same literal index — the case bilc's own
 // checkParBranchChannelUsage already catches for static branches via
-// source-text identity; now proven by static_check too, and via a real
+// source-text identity; now proven by vet too, and via a real
 // channel-array element, not just a base-identifier heuristic. Must be
 // flagged.
 package main

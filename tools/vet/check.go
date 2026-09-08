@@ -1,4 +1,4 @@
-// static_check type-checks a Go file (bilc's transformed output, or any Go
+// Package vet type-checks a Go file (bilc's transformed output, or any Go
 // source using the same par(branches ...func()) shape) and reports
 // channel- and variable-usage violations: point-to-point direction
 // conflicts across par branches (channels.go), confinement leaks — a
@@ -9,7 +9,7 @@
 // pointer, map, or interface value across par branches at all
 // (refshare.go) — and array/slice disjointness, proven rather than
 // trusted (regions.go).
-package main
+package vet
 
 import (
 	"fmt"
@@ -18,7 +18,6 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
-	"os"
 )
 
 // analyzeFile parses and type-checks the Go source at path. typeErrs
@@ -46,24 +45,23 @@ func analyzeFile(fset *token.FileSet, path string) (file *ast.File, info *types.
 	return file, info, typeErrs, nil
 }
 
-func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: static_check <file.go>")
-		os.Exit(2)
-	}
-	path := os.Args[1]
-
+// Check parses, type-checks, and runs all of Bil's usage checks against the
+// Go file at path. err is non-nil only when the file couldn't be analyzed
+// at all (I/O or parse failure) — a file that parses and type-checks but
+// fails one or more Bil rules returns a nil err with a non-empty messages
+// slice. Each message is a fully formatted, ready-to-print line (position,
+// description, and rationale). ok := err == nil && len(messages) == 0.
+func Check(path string) (messages []string, err error) {
 	fset := token.NewFileSet()
 	file, info, typeErrs, err := analyzeFile(fset, path)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return nil, err
 	}
 	if len(typeErrs) > 0 {
 		for _, e := range typeErrs {
-			fmt.Fprintln(os.Stderr, e)
+			messages = append(messages, e.Error())
 		}
-		os.Exit(1)
+		return messages, nil
 	}
 
 	conflicts, closeSendConflicts := CheckChannelUsage(info, file)
@@ -73,17 +71,12 @@ func main() {
 	refConflicts := CheckRefSharing(info, file)
 	arrayConflicts, appendViolations := CheckArraySharing(info, file)
 
-	if len(conflicts) == 0 && len(closeSendConflicts) == 0 && len(leaks) == 0 && len(varConflicts) == 0 && len(refConflicts) == 0 &&
-		len(arrayConflicts) == 0 && len(appendViolations) == 0 {
-		return
-	}
-
 	for _, c := range conflicts {
 		if c.Dir == dirClose {
-			fmt.Printf(
-				"%s: channel %s is closed in more than one par branch (branch %d, also branch %d at %s) — closing a channel twice panics; a channel should be closed by exactly one component of a parallel\n",
+			messages = append(messages, fmt.Sprintf(
+				"%s: channel %s is closed in more than one par branch (branch %d, also branch %d at %s) — closing a channel twice panics; a channel should be closed by exactly one component of a parallel",
 				fset.Position(c.FirstPos), c.Identity.Name(), c.FirstFrom+1, c.SecondFrom+1, fset.Position(c.SecondPos),
-			)
+			))
 			continue
 		}
 		verb := "sent to"
@@ -92,47 +85,47 @@ func main() {
 			verb = "received from"
 			noun = "input"
 		}
-		fmt.Printf(
-			"%s: channel %s is %s in more than one par branch (branch %d, also branch %d at %s) — a channel may only be used for %s in one component of a parallel\n",
+		messages = append(messages, fmt.Sprintf(
+			"%s: channel %s is %s in more than one par branch (branch %d, also branch %d at %s) — a channel may only be used for %s in one component of a parallel",
 			fset.Position(c.FirstPos), c.Identity.Name(), verb, c.FirstFrom+1, c.SecondFrom+1, fset.Position(c.SecondPos), noun,
-		)
+		))
 	}
 	for _, cs := range closeSendConflicts {
-		fmt.Printf(
-			"%s: channel %s is closed here (branch %d) while also sent to in a different par branch (branch %d, at %s) — a send on a closed channel panics\n",
+		messages = append(messages, fmt.Sprintf(
+			"%s: channel %s is closed here (branch %d) while also sent to in a different par branch (branch %d, at %s) — a send on a closed channel panics",
 			fset.Position(cs.ClosePos), cs.Identity.Name(), cs.CloseFrom+1, cs.SendFrom+1, fset.Position(cs.SendPos),
-		)
+		))
 	}
 	for _, l := range leaks {
-		fmt.Printf("%s: %s\n", fset.Position(l.Pos), l.Message())
+		messages = append(messages, fmt.Sprintf("%s: %s", fset.Position(l.Pos), l.Message()))
 	}
 	for _, v := range varConflicts {
-		fmt.Printf(
-			"%s: variable %s written here (branch %d) is also used in a concurrent par branch (branch %d, also at %s) — a variable changed by input or assignment in one component of a parallel may not be used, read or written, in any other component\n",
+		messages = append(messages, fmt.Sprintf(
+			"%s: variable %s written here (branch %d) is also used in a concurrent par branch (branch %d, also at %s) — a variable changed by input or assignment in one component of a parallel may not be used, read or written, in any other component",
 			fset.Position(v.WritePos), v.Obj.Name(), v.WriteBranch+1, v.UseBranch+1, fset.Position(v.UsePos),
-		)
+		))
 	}
 	for _, r := range refConflicts {
-		fmt.Printf("%s: %s\n", fset.Position(r.FirstPos), r.Message(fset))
+		messages = append(messages, fmt.Sprintf("%s: %s", fset.Position(r.FirstPos), r.Message(fset)))
 	}
 	for _, a := range arrayConflicts {
 		if a.WriteBranch == a.UseBranch {
-			fmt.Printf(
-				"%s: array/slice region written here (branch %d, replicated) may overlap a different concurrent instantiation of the same replicated construct — components of an array may be assigned to in parallel only if it can be determined at compile time that the used subscripts select disjoint components\n",
+			messages = append(messages, fmt.Sprintf(
+				"%s: array/slice region written here (branch %d, replicated) may overlap a different concurrent instantiation of the same replicated construct — components of an array may be assigned to in parallel only if it can be determined at compile time that the used subscripts select disjoint components",
 				fset.Position(a.WritePos), a.WriteBranch+1,
-			)
+			))
 			continue
 		}
-		fmt.Printf(
-			"%s: array/slice region written here (branch %d) may overlap a region touched in a concurrent par branch (branch %d, also at %s) — components of an array may be assigned to in parallel only if it can be determined at compile time that the used subscripts select distinct components\n",
+		messages = append(messages, fmt.Sprintf(
+			"%s: array/slice region written here (branch %d) may overlap a region touched in a concurrent par branch (branch %d, also at %s) — components of an array may be assigned to in parallel only if it can be determined at compile time that the used subscripts select distinct components",
 			fset.Position(a.WritePos), a.WriteBranch+1, a.UseBranch+1, fset.Position(a.UsePos),
-		)
+		))
 	}
 	for _, av := range appendViolations {
-		fmt.Printf(
-			"%s: append on a shared array/slice region whose capacity isn't known bounded to its own length — this can silently overwrite a neighboring region without reallocating; slice with a full/three-index expression (s[lo:hi:hi]) to bound its capacity\n",
+		messages = append(messages, fmt.Sprintf(
+			"%s: append on a shared array/slice region whose capacity isn't known bounded to its own length — this can silently overwrite a neighboring region without reallocating; slice with a full/three-index expression (s[lo:hi:hi]) to bound its capacity",
 			fset.Position(av.Pos),
-		)
+		))
 	}
-	os.Exit(1)
+	return messages, nil
 }

@@ -62,7 +62,7 @@
 // — a plain capped root array must not widen a slice of it back to the
 // whole array, or two genuinely disjoint hand-written slices of it would
 // look like they overlap.
-package main
+package vet
 
 import (
 	"fmt"

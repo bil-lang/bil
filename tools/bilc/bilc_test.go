@@ -1,4 +1,4 @@
-package main
+package bilc
 
 import (
 	"bytes"
@@ -106,19 +106,19 @@ func TestErr(t *testing.T) {
 // TestBareBlockRaceCaughtDynamically documents a known, currently-open gap
 // in bilc itself: bilc has no static check left for general variable usage
 // or point-to-point channel usage at all (both moved entirely to
-// tools/static_check's variables.go/channels.go, which — unlike the bilc
+// tools/vet's variables.go/channels.go, which — unlike the bilc
 // checks they replaced — aren't restricted to call-shaped branches, so a
 // bare `{...}` or `seq{...}` branch closing over and mutating a variable
 // directly (both legal shapes, sanctioned by Example 1's design notes) is
-// no longer even a residual gap *there* — static_check does catch this
+// no longer even a residual gap *there* — vet does catch this
 // example, confirmed directly). This test proves TestOK's `-race` pass
 // does, as bilc's own dynamic backstop for bilc's own now-total absence of
 // a static check here — not a fix, and not sound (a race the detector
 // doesn't happen to hit on a given run still slips through), but real
-// coverage for bilc's real hole, one static_check itself has already
-// closed for anyone running the combined tools/bilc-run pipeline rather
+// coverage for bilc's real hole, one vet itself has already
+// closed for anyone running the combined `bil run` pipeline rather
 // than bare `bilc` — bilc's own checks have been progressively removed in
-// static_check's favor.
+// vet's favor.
 func TestBareBlockRaceCaughtDynamically(t *testing.T) {
 	src := []byte(`package main
 
@@ -297,4 +297,4 @@ func main() {
 // components of a parallel") no longer has a bilc side to test here —
 // bilc's own point-to-point channel check has been removed entirely; the
 // exemption is tested where the rule itself now lives, at
-// tools/static_check/testdata/chan_timer_multi_recv.go.
+// tools/vet/testdata/chan_timer_multi_recv.go.

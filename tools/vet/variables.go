@@ -40,7 +40,7 @@
 // substitution too, separable follow-up work), interfaces (can hold any
 // underlying type, excluded conservatively), and channel arrays
 // (replicated par/parFor).
-package main
+package vet
 
 import (
 	"go/ast"

@@ -21,7 +21,7 @@
 // nested *ast.IndexExprs. regionOf's own IndexExpr case (regions.go) tries
 // regionFromDoubleIndex first; anything that isn't this exact shape falls
 // through to the ordinary single-index path unchanged.
-package main
+package vet
 
 import (
 	"go/ast"

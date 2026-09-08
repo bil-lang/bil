@@ -54,7 +54,7 @@
 // *ast.CallExpr — but a named binding, `t := time.After(d)` used via `t`
 // in more than one branch, is a real *types.Var identity this checker
 // does track, and without this exemption would incorrectly flag).
-package main
+package vet
 
 import (
 	"go/ast"

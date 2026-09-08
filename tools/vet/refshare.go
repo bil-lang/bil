@@ -25,7 +25,7 @@
 // invisible: an *already-existing* pointer (or map) variable shared into
 // two branches, with no `&x` moment for anything to catch. See the plan
 // this was built from for the worked example.
-package main
+package vet
 
 import (
 	"fmt"

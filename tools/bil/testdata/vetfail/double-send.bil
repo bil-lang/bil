@@ -1,0 +1,16 @@
+package main
+
+func main() {
+
+	c := make(chan int)
+
+	par {
+		seq {
+			c <- 1
+		}
+		seq {
+			c <- 2
+		}
+	}
+
+}

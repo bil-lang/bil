@@ -29,7 +29,7 @@
 // carves out an exemption for a container-typed value at all; every rule
 // below applies uniformly to any expression that resolves to a scalar
 // `chan T`, wherever it came from.
-package main
+package vet
 
 import (
 	"fmt"

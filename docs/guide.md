@@ -620,17 +620,19 @@ graph LR
 
 ### Running a Bil Program
 
-Run a `.bil` file with:
+Build the `bil` tool once (`cd tools/bil && go build -o bil .`), then run a `.bil` file with:
 
 ```
-tools/bilc-run examples/01-twoprocs.bil
+tools/bil/bil run examples/01-twoprocs.bil
 ```
 
-This builds and chains together the two Bil tools (`bilc` and `static_check`), failing at the first step that doesn't pass rather than running anything it hasn't checked:
+`bil run` chains together Bil's two internal tools, failing at the first step that doesn't pass rather than running anything it hasn't checked:
 
 1. **`tools/bilc`** — a source-to-source preprocessor (a _transpiler_) that uses `go/scanner` and `go/token` to parse Bil code, apply certain heuristic rules and to provide a set of helper functions. Finally, it uses `go/format` to translate the `.bil` file into legal Go.
-2. **`tools/static_check`** — a `go/ast`/`go/types`-based static analyzer that checks the transpiled Go against Bil's usage rules (for example: a channel may only be used for input in one `par` branch, and output in one other). A violation is reported and the program is **not** run; positions currently point at the transpiled Go, not the `.bil` source, since `bilc` doesn't emit a source map back yet.
+2. **`tools/vet`** — a `go/ast`/`go/types`-based static analyzer that checks the transpiled Go against Bil's usage rules (for example: a channel may only be used for input in one `par` branch, and output in one other). A violation is reported and the program is **not** run; positions currently point at the transpiled Go, not the `.bil` source, since `bilc` doesn't emit a source map back yet.
 3. Only if that passes: calls `go run` on the transpiled Go.
+
+To run steps 1–2 only, without executing the program, use `bil vet` instead of `bil run`.
 
 [^^](#top)
 
@@ -688,7 +690,7 @@ The following helper `func`s are provided by Bil as a built in "how to" correctl
 
 #### `splitN`
 
-Splits a slice into `n` disjoint chunks (any remainder folded into the last one), `chunks := splitN(data, n)` — the one sanctioned way to divide a shared array across `par` branches. Chunks are views into the same backing array, not copies; each chunk's disjointness from every other is proven once, by `static_check`'s `regions.go`, rather than trusted or re-derived by hand at every call site.
+Splits a slice into `n` disjoint chunks (any remainder folded into the last one), `chunks := splitN(data, n)` — the one sanctioned way to divide a shared array across `par` branches. Chunks are views into the same backing array, not copies; each chunk's disjointness from every other is proven once, by `vet`'s `regions.go`, rather than trusted or re-derived by hand at every call site.
 
 ```go
 func splitN[T any](s []T, n int) [][]T {
@@ -708,7 +710,7 @@ func splitN[T any](s []T, n int) [][]T {
 
 #### `splitN2D`
 
-The 2D counterpart of `splitN` — splits a matrix (`[][]T`) into an `nr`×`nc` grid of rectangular tiles, `tiles := splitN2D(matrix, nr, nc)`, each `tiles[i][j]` proven disjoint from every other tile by `static_check`'s `grid.go`. A separate function, not a variadic extension of `splitN`: Go generics can't unify a 1D and 2D splitter behind one signature, since the input type itself changes shape with dimensionality (`[]T` vs `[][]T`), not just a type parameter.
+The 2D counterpart of `splitN` — splits a matrix (`[][]T`) into an `nr`×`nc` grid of rectangular tiles, `tiles := splitN2D(matrix, nr, nc)`, each `tiles[i][j]` proven disjoint from every other tile by `vet`'s `grid.go`. A separate function, not a variadic extension of `splitN`: Go generics can't unify a 1D and 2D splitter behind one signature, since the input type itself changes shape with dimensionality (`[]T` vs `[][]T`), not just a type parameter.
 
 ```go
 func splitN2D[T any](m [][]T, nr, nc int) [][][][]T {
