@@ -51,7 +51,7 @@ jobs:
           name="bil_${version}_${{ matrix.goos }}_${{ matrix.goarch }}"
           cd "dist/${{ matrix.goos }}_${{ matrix.goarch }}"
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            zip -q "../${name}.zip" .
+            zip -rq "../${name}.zip" .
           else
             tar czf "../${name}.tar.gz" .
           fi
