@@ -6,7 +6,7 @@
 
 **Bil**: a variant of Go for parallel processors.
 
-Bil and Go both have concurrency models that are heavily inspired by Hoare’s.
+Bil and Go both have concurrency models that are heavily inspired by Hoare’s CSP.
 
 Go is a general-purpose language that borrows CSP’s channel-and-process ideas but relaxes them with buffering, dynamic concurrency, and conventional shared-memory mechanisms
 
