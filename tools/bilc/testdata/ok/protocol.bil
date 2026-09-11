@@ -41,7 +41,7 @@ proc logSender(out chan<- LogMsg) {
 
 proc logReceiver(in <-chan LogMsg) {
 	for range 3 {
-		switch v := (<-in).(type) {
+		switch in :-> v.(type) {
 		case Info:
 			println("info", v.Code)
 		case Warn:

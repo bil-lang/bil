@@ -19,6 +19,7 @@ The `.bil` file extension is used; a file starts `package main` exactly like Go.
 | `chan -> x, ok` | _(no occam equivalent)_ | **Comma-ok, assign**: `c -> x, ok` means `x, ok = <-c` — Go's own two-value receive, with no occam analog (occam channels have no "closed" state to detect). `ok` is `false` exactly when `c` is closed and drained; `x`/`ok` must already be declared. Either side may be `_`. |
 | `chan :-> x, ok` | _(no occam equivalent)_ | **Comma-ok, declare**: `c :-> x, ok` means `x, ok := <-c`, both fresh. Works in every context the single-value form does — bare statement, `alt` guard, replicated `alt` guard. `close(c)` is plain Go, not a Bil keyword; this is what lets you actually observe it. |
 | `chan -> Method(args)` | _(no occam equivalent)_ | Receive on a call-shaped right side — a Go-interop escape hatch, needed for things like `time -> After(d)` that have no occam analog. |
+| `switch chan :-> v.(type) { ... }` | _(no occam equivalent)_ | Sugar for Go's own type-switch guard: `switch v := (<-chan).(type) { ... }`. `case Type:` clauses underneath are plain Go — no custom clause syntax at all. Only `:->` applies here (never `->`): Go's type-switch guard grammar has no assignment form to offer. `chan :-> _.(type)` (don't need the value) collapses to Go's own bare `switch (<-chan).(type) { ... }`. |
 | `alt { g1 { ... } g2 { ... } }` | `ALT` | Wait for whichever guard becomes ready first, then run that body. Guards read left-to-right (`chan -> target { body }` or `chan :-> target { body }`), echoing occam's `chan ? x`. |
 | `(cond) && chan -> x { ... }` | `(cond) & chan ? x` | A conditional guard inside `alt` — only eligible when `cond` is true. (`&&` matches Go's own logical-and token, not occam's bare `&`.) `->`/`:->` both work here, same assign/declare rule. |
 | `alt i := range N { ... }` | `ALT i = 0 FOR N` | Replicated `alt` — one process listening across a runtime-sized set of channels at once. The bind target takes the same `->`/`:->` choice as any other receive; `i` (the replica index) is fresh either way, since it's the construct's own runtime dispatch result, not something occam's static replicator has an equivalent of. |
@@ -211,7 +212,7 @@ func main() {
 
 **4. Tagged/variant channel protocol**
 
-occam's variant protocol (`PROTOCOL ... CASE`) has no dedicated Bil keyword — Bil just uses Go's own type-switch directly on the received value, which already expresses the same "dispatch by tag" idea without needing new syntax.
+occam's variant protocol (`PROTOCOL ... CASE`) has no dedicated Bil clause syntax — the `case Type:` clauses are plain Go, exactly the same "dispatch by tag" idiom Go already has. The one piece of sugar Bil does add is `:->` on the `switch` guard line itself (`switch chan :-> v.(type) { ... }`), reading left-to-right like every other Bil receive; writing the plain Go guard directly (`switch v := (<-chan).(type) { ... }`) works exactly the same.
 
 occam:
 ```occam
@@ -267,7 +268,7 @@ proc logSender(out chan<- LogMsg) {
 
 proc logReceiver(in <-chan LogMsg) {
 	for range 3 {
-		switch v := (<-in).(type) {
+		switch in :-> v.(type) {
 		case Info:
 			println("info", v.Code)
 		case Warn:

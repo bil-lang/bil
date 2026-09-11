@@ -1,0 +1,56 @@
+package main
+
+// `switch chan :-> v.(type) { case Type: ... }` desugars to Go's own
+// `switch v := (<-chan).(type) { ... }` -- only the guard line is sugar,
+// the case clauses are plain Go. `chan :-> _.(type)` (bind shape with a
+// blank target) collapses to Go's own bare `switch (<-chan).(type) { ... }`
+// -- "dispatch by type, don't need the value" needs no ceremony either way.
+
+type Msg interface{ isMsg() }
+type Info struct{ Code int }
+type Warn struct{ Code int }
+
+func (Info) isMsg() {}
+func (Warn) isMsg() {}
+
+proc bindReceiver(in <-chan Msg) {
+	for range 2 {
+		switch in :-> v.(type) {
+		case Info:
+			println("bind info", v.Code)
+		case Warn:
+			println("bind warn", v.Code)
+		}
+	}
+}
+
+proc blankReceiver(in <-chan Msg) {
+	for range 2 {
+		switch in :-> _.(type) {
+		case Info:
+			println("blank info")
+		case Warn:
+			println("blank warn")
+		}
+	}
+}
+
+func main() {
+	a := make(chan Msg)
+	par {
+		bindReceiver(a)
+		seq {
+			a <- Info{Code: 1}
+			a <- Warn{Code: 2}
+		}
+	}
+
+	b := make(chan Msg)
+	par {
+		blankReceiver(b)
+		seq {
+			b <- Info{Code: 3}
+			b <- Warn{Code: 4}
+		}
+	}
+}

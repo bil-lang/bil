@@ -292,7 +292,7 @@ graph LR
 
 ### Example 5: Channel protocols
 
-Typed, structured messages over a _channel_, including variant/tagged protocols dispatched with a plain Go type-switch. Everything sent so far has been a bare `int`/`bool`; first example needing compound data and message-shape checking. Two independent demos, run one after the other (not concurrently — see design notes for why): a `Point` protocol (`X`, `Y` sent together as one atomic message) shows the plain structured case; a `LogMsg` protocol (tagged `Info`/`Warn`, each carrying an `INT`) shows the variant case.
+Typed, structured messages over a _channel_, including variant/tagged protocols dispatched with a plain Go type-switch. Everything sent so far has been a bare `int`/`bool`; first example needing compound data and message-shape checking. Two independent demos: a `Point` protocol (`X`, `Y` sent together as one atomic message) shows the plain structured case; a `LogMsg` protocol (tagged `Info`/`Warn`, each carrying an `INT`) shows the variant case.
 
 ```go
 package main
@@ -338,7 +338,7 @@ proc logSender(out chan<- LogMsg) {
 
 proc logReceiver(in <-chan LogMsg) {
 	for range 3 {
-		switch v := (<-in).(type) {
+		switch in :-> v.(type) {
 		case Info:
 			println("info", v.Code)
 		case Warn:
@@ -725,7 +725,7 @@ Receive sugar for `chan`, read left-to-right like occam's `?`. Two forms, mirror
 - `c  -> x` is `x  = <-c` — **assign**. `x` must already be declared.
 - `c :-> x` is `x := <-c` — **declare**. `x` is introduced right here, and must *not* already be declared.
 
-Either form takes an optional comma-ok suffix, mirroring Go's own two-value channel receive: e.g. `c -> x, ok` is `x, ok = <-c`. Either form takes the Go idiomatic `_` also. Either form generalizes to a receive on a method/function call when the right side is call-shaped (`c -> Method(args)` → `<-c.Method(args)`, e.g. `time -> After(d)`).
+Either form takes an optional comma-ok suffix, mirroring Go's own two-value channel receive: e.g. `c -> x, ok` is `x, ok = <-c`. Either form takes the Go idiomatic `_` also. Either form generalizes to a receive on a method/function call when the right side is call-shaped (`c -> Method(args)` → `<-c.Method(args)`, e.g. `time -> After(d)`). `:->` also can be used in a type-switch guard: `switch c :-> v.(type) { case T1: ...; case T2: ... }` is `switch v := (<-c).(type) { ... }`, `v` a fresh binding as usual.
 
 #### `proc`
 

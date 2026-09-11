@@ -1,0 +1,4 @@
+bind info 1
+bind warn 2
+blank info
+blank warn

@@ -1146,6 +1146,68 @@ foundEnd:
 	return idxSrc, valSrc, j, true
 }
 
+// matchSwitchTypeGuard recognizes `CHAN :-> V.(type)` immediately after a
+// `switch` keyword — sugar for Go's own type-switch guard, `V := (<-CHAN).
+// (type)`, read left-to-right like every other Bil receive (see
+// arrowKind) rather than Go's receive-flows-right form. Only the `:->`
+// (declare) form applies here, never plain `->`: Go's type-switch guard
+// grammar has exactly two shapes, `v := x.(type)` or a bare `x.(type)`
+// with no bound variable at all, and no assignment form (`v = x.(type)`)
+// exists to fall back to — so an occam-style "assign into an
+// already-declared variable" choice simply isn't available for this
+// construct, unlike every other Bil receive. V is blank-safe: `V == "_"`
+// signals the caller (see transform's `token.SWITCH` case) to emit Go's
+// own bare `x.(type)` form instead of the needless-ceremony `_ :=
+// x.(type)`, the same "collapse to the simpler underlying form" move
+// already used for a blank target elsewhere in this file. Everything
+// after the guard — the `case Type:` clauses, the closing `}` — is
+// ordinary Go, untouched by this transform; only the header expression up
+// to (and including) the opening `{` is rewritten, so no recursion into
+// the switch body is needed the way the old (now-removed) `-> case`
+// construct required: the body is just more tokens in transform's own
+// flat walk, picked up automatically like any other `{ }` block's
+// contents.
+func (t *transformer) matchSwitchTypeGuard(lo, hi int) (chanSrc, varSrc string, brace int, ok bool) {
+	if lo < hi && t.toks[lo].tok == token.IDENT && t.toks[lo].lit == "link" {
+		return "", "", 0, false // see matchLinkReceive; not a real channel, no type-switch dispatch
+	}
+	lhsEnd, ok1 := t.parsePrimaryExpr(lo, hi)
+	if !ok1 {
+		return "", "", 0, false
+	}
+	kind, arrowEnd, akOk := t.matchArrow(lhsEnd, hi)
+	if !akOk || kind != arrowDeclare {
+		return "", "", 0, false
+	}
+	i := arrowEnd
+	if i >= hi || t.toks[i].tok != token.IDENT {
+		return "", "", 0, false
+	}
+	varSrc = t.toks[i].lit
+	i++
+	if i >= hi || t.toks[i].tok != token.PERIOD {
+		return "", "", 0, false
+	}
+	i++
+	if i >= hi || t.toks[i].tok != token.LPAREN {
+		return "", "", 0, false
+	}
+	i++
+	if i >= hi || t.toks[i].tok != token.TYPE {
+		return "", "", 0, false
+	}
+	i++
+	if i >= hi || t.toks[i].tok != token.RPAREN {
+		return "", "", 0, false
+	}
+	i++
+	if i >= hi || t.toks[i].tok != token.LBRACE {
+		return "", "", 0, false
+	}
+	chanSrc = string(t.src[t.off(t.toks[lo].pos):t.off(t.toks[lhsEnd].pos)])
+	return chanSrc, varSrc, i, true
+}
+
 // emitAltClauses parses every clause of an `alt { ... }` block ([lo,hi) is
 // the block's interior; hi is the index of its closing `}`) and writes a Go
 // `select` — preceded by any setup guarded clauses need — to out.
@@ -1554,6 +1616,41 @@ func (t *transformer) transform(lo, hi int) []byte {
 			out.WriteString("\n})")
 			cursor = t.off(t.toks[closeIdx].pos) + 1
 			i = closeIdx + 1
+
+		case tk.tok == token.SWITCH:
+			if chanSrc, varSrc, brace, ok := t.matchSwitchTypeGuard(i+1, hi); ok {
+				// The `{` is written here, as part of this synthetic
+				// header, rather than left for the outer scan to copy
+				// verbatim the way most other single-line rewrites do
+				// (e.g. matchArrowReceive's) — because unlike those, the
+				// next real token after our inserted text isn't a natural
+				// statement terminator (`;`/`}`) but `{` itself, and
+				// flushTo's unconditional per-line //line-directive resync
+				// (see resync's doc comment) would otherwise land a
+				// forced newline directly after our `.(type)`'s `)` —
+				// exactly the token Go's automatic semicolon insertion
+				// fires after, silently turning the guard into `... .
+				// (type);` and breaking the type-switch grammar entirely
+				// (confirmed: produces "use of .(type) outside type
+				// switch"). Writing `{` (never an ASI trigger) ourselves
+				// and recursing into the body — the same pattern
+				// `alt`/`par`/replicated-alt already use for their own
+				// bodies — sidesteps it: resync's next forced newline
+				// lands right after a safe token instead.
+				flushTo(t.off(tk.pos))
+				if varSrc == "_" {
+					out.WriteString("switch (<-" + chanSrc + ").(type) {\n")
+				} else {
+					out.WriteString("switch " + varSrc + " := (<-" + chanSrc + ").(type) {\n")
+				}
+				closeIdx := matchBrace(t.toks, brace)
+				out.Write(t.transform(brace+1, closeIdx))
+				out.WriteString("\n}")
+				cursor = t.off(t.toks[closeIdx].pos) + 1
+				i = closeIdx + 1
+			} else {
+				i++
+			}
 
 		case tk.tok == token.IDENT:
 			if idxSrc, varSrc, end, ok := t.matchLinkReceive(i, hi); ok {
