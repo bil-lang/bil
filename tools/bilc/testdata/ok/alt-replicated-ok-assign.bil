@@ -1,0 +1,33 @@
+package main
+
+// Comma-ok in a replicated alt guard, assign form: `->` must route both v
+// and ok into the already-declared outer variables (via the bilIdx/
+// bilVal/bilOk temp-routing in transform's replicated-alt emission), not
+// shadow them with fresh ones scoped to the loop body — the final println
+// only sees ok's real value if that routing actually reaches the outer
+// scope.
+
+proc sender(c chan<- int) {
+	c <- 3
+	close(c)
+}
+
+func main() {
+	chans := makeChans[int](1)
+	var v int
+	var ok bool
+
+	par {
+		sender(chans[0])
+		seq {
+			for range 2 {
+				alt i := range 1 {
+					chans[i] -> v, ok {
+						println(i, v, ok)
+					}
+				}
+			}
+			println("after:", v, ok)
+		}
+	}
+}

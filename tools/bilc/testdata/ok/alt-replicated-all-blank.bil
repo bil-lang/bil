@@ -1,0 +1,28 @@
+package main
+
+// Regression test: VAR, BIND, and OK all `_` under `:->` — `alt _ := range
+// N { chans[_] :-> _, _ { ... } }`, a pure "wait for any one of these to be
+// ready" signal with nothing bound at all. A direct `_, _, _ := altN(...)`
+// desugar would be illegal Go ("no new variables on left side of :="),
+// which is exactly why transform's replicated-alt emission always routes
+// through fixed throwaway temp names first, regardless of how many of
+// VAR/BIND/OK are blank.
+
+proc sender(c chan<- int) {
+	c <- 1
+}
+
+func main() {
+	chans := makeChans[int](2)
+
+	par {
+		sender(chans[1])
+		seq {
+			alt _ := range 2 {
+				chans[_] :-> _, _ {
+					println("fired")
+				}
+			}
+		}
+	}
+}

@@ -724,12 +724,10 @@ Wraps a block to indicate a `par` branch's own sequential body — sugar for a b
 
 Receive sugar for `chan`, read left-to-right like occam's `?`. Two forms, mirroring Go's own `=`/`:=` split for a channel receive:
 
-- `c -> x` is `x = <-c` — **assign**. `x` must already be declared. This is occam's own semantics (occam has no inline declare-on-use at all — every variable is predeclared, always).
-- `c :-> x` is `x := <-c` — **declare**. `x` is introduced fresh right here, and must *not* already be declared. A deliberate, Go-idiomatic extension with no occam equivalent.
+- `c  -> x` is `x  = <-c` — **assign**. `x` must already be declared.
+- `c :-> x` is `x := <-c` — **declare**. `x` is introduced right here, and must *not* already be declared.
 
-Both forms mean the same thing everywhere a receive can appear — a bare statement, an `alt` guard, or a replicated `alt` guard (see `#### alt` below) — so which one to use is a per-receive choice, not something fixed by which construct surrounds it. The one exception is `-> case` (tagged dispatch, see below), which always declares: Go's type-switch statement has no assignment form to offer.
-
-Either arrow generalizes to a receive on a method/function call when the right side is call-shaped (`c -> Method(args)` → `<-c.Method(args)`, needed for `time -> After(d)`) — there's nothing to bind in that case, so the arrow choice is irrelevant.
+Either form takes an optional comma-ok suffix, mirroring Go's own two-value channel receive: e.g. `c -> x, ok` is `x, ok = <-c`. Either form takes the Go idiomatic `_` also. Either form generalizes to a receive on a method/function call when the right side is call-shaped (`c -> Method(args)` → `<-c.Method(args)`, e.g. `time -> After(d)`).
 
 #### `proc`
 

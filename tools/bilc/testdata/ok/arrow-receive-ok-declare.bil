@@ -1,0 +1,28 @@
+package main
+
+// Comma-ok receive: `c :-> v, ok` declares both fresh, mirroring Go's own
+// `v, ok := <-c`. ok reads false exactly once the channel is closed and
+// drained — the idiomatic way to detect completion without a sentinel
+// value. Two distinct name pairs (v1/ok1, v2/ok2), like arrow-receive.bil's
+// x/y — a second `:->` reusing the same names in the same scope would hit
+// Go's own "no new variables on left side of :=", same as any repeated `:=`
+// declaration; that's an ordinary Go rule this sugar doesn't route around.
+
+proc sender(c chan<- int) {
+	c <- 42
+	close(c)
+}
+
+func main() {
+	c := make(chan int)
+
+	par {
+		sender(c)
+		seq {
+			c :-> v1, ok1
+			println(v1, ok1)
+			c :-> v2, ok2
+			println(v2, ok2)
+		}
+	}
+}

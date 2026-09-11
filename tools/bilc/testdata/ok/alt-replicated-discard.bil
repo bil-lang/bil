@@ -1,0 +1,27 @@
+package main
+
+// `_` discard in a replicated alt guard, both arrows: `_` never needs
+// predeclaration (discarding is discarding, assign or declare), including
+// the all-blank case where VAR, BIND, and OK are all `_` — the one shape
+// that would be illegal as a direct `:=` (no new variables), which is why
+// transform's replicated-alt emission always routes through throwaway
+// temps first rather than declaring VAR/BIND/OK directly.
+
+proc sender(c chan<- int) {
+	c <- 1
+}
+
+func main() {
+	chans := makeChans[int](2)
+
+	par {
+		sender(chans[1])
+		seq {
+			alt i := range 2 {
+				chans[i] -> _ {
+					println("assign-discard", i)
+				}
+			}
+		}
+	}
+}

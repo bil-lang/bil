@@ -187,8 +187,18 @@ func splitN2D[T any](m [][]T, nr, nc int) [][][][]T {
 // `select`) just never picks it. This is a faithful per-replica boolean
 // guard, not an approximation — the standard "disable a select case at
 // runtime" idiom is exactly guard-per-replica.
+//
+// The third return value is reflect.Select's own recvOK — true unless the
+// winning channel was closed and drained — plumbed straight through
+// rather than discarded, so a comma-ok replicated-alt guard (`chan[i] ->
+// v, ok { ... }` / `chan[i] :-> v, ok { ... }`) can detect a closed
+// channel exactly like Go's native two-value receive does. Every
+// desugared call site always receives all three values (see transform's
+// replicated-alt emission) and discards the ones the .bil source didn't
+// ask for — altN itself stays a single primitive rather than forking into
+// a comma-ok and a non-comma-ok variant.
 const altNHelper = `
-func altN[T any](chans []chan T, guards ...bool) (int, T) {
+func altN[T any](chans []chan T, guards ...bool) (int, T, bool) {
 	cases := make([]reflect.SelectCase, len(chans))
 	for i, ch := range chans {
 		if len(guards) > 0 && !guards[i] {
@@ -196,8 +206,8 @@ func altN[T any](chans []chan T, guards ...bool) (int, T) {
 		}
 		cases[i] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch)}
 	}
-	chosen, recv, _ := reflect.Select(cases)
-	return chosen, recv.Interface().(T)
+	chosen, recv, recvOK := reflect.Select(cases)
+	return chosen, recv.Interface().(T), recvOK
 }
 `
 
@@ -584,6 +594,30 @@ func (t *transformer) matchArrow(i, hi int) (kind arrowKind, end int, ok bool) {
 	return 0, 0, false
 }
 
+// matchOkTarget checks for an optional Go-style comma-ok suffix — `, IDENT`
+// — immediately after a receive's primary bind target, starting at i
+// (bounded by hi). This is what lets `chan -> v, ok` / `chan :-> v, ok`
+// desugar to Go's own two-value receive (`v, ok = <-chan` / `v, ok :=
+// <-chan`), the idiomatic way to detect a closed, drained channel — `ok`
+// is false exactly then. Absent (no comma at all, or a comma not followed
+// by a plain identifier — e.g. the comma belongs to something else
+// entirely) is not a failure: every single-value receive keeps working
+// unchanged, since this suffix is purely additive. The identifier is
+// captured via its token literal (`.lit`), not a source-position slice —
+// deliberately, to sidestep the trailing-whitespace-in-a-slice pitfall
+// that `matchArrow`'s callers already had to work around for the primary
+// target (see the `strings.TrimSpace` call sites).
+func (t *transformer) matchOkTarget(i, hi int) (okSrc string, end int, hasOk bool) {
+	if i >= hi || t.toks[i].tok != token.COMMA {
+		return "", i, false
+	}
+	j := i + 1
+	if j >= hi || t.toks[j].tok != token.IDENT {
+		return "", i, false
+	}
+	return t.toks[j].lit, j + 1, true
+}
+
 // isReplicatedAlt reports whether tokens starting at lo (which must
 // immediately follow the `alt` keyword) form `VAR := range EXPR {
 // [(COND) &&] BASE[VAR] -> BIND { BODY } }` — replication attached
@@ -597,17 +631,20 @@ func (t *transformer) matchArrow(i, hi int) (kind arrowKind, end int, ok bool) {
 // can reference VAR freely (`guards[j]`, `len(q[j]) > 0`, ...), same
 // freedom the non-replicated `(cond) && chan -> target` guard already has.
 // BIND may be introduced with either arrow (see arrowKind): `-> BIND`
-// assigns into an already-declared BIND, `:-> BIND` declares it fresh.
-// Desugars (in transform) to a call to altN, the underlying primitive
-// (Example 13) — this is sugar over that, not a separate mechanism, the
-// same relationship `par i := range N` has to parFor. Returns the loop
-// variable name, the range-expression token range, the guard condition's
-// source (empty if unguarded), the channel-array's source, the bind
-// variable name and its arrow kind, the body token range, and the index
-// of the whole construct's closing `}`.
-func (t *transformer) isReplicatedAlt(lo, hi int) (varName string, exprLo, exprHi int, condSrc, baseSrc, bindVar string, bindKind arrowKind, bodyLo, bodyHi, closeIdx int, ok bool) {
-	fail := func() (string, int, int, string, string, string, arrowKind, int, int, int, bool) {
-		return "", 0, 0, "", "", "", 0, 0, 0, 0, false
+// assigns into an already-declared BIND, `:-> BIND` declares it fresh. An
+// optional comma-ok suffix (see matchOkTarget) — `-> BIND, OK` / `:->
+// BIND, OK` — extends this to also expose whether the winning receive came
+// from a closed, drained channel. Desugars (in transform) to a call to
+// altN, the underlying primitive (Example 13) — this is sugar over that,
+// not a separate mechanism, the same relationship `par i := range N` has
+// to parFor. Returns the loop variable name, the range-expression token
+// range, the guard condition's source (empty if unguarded), the
+// channel-array's source, the bind variable name and its arrow kind, the
+// comma-ok target (if any) and whether one was given, the body token
+// range, and the index of the whole construct's closing `}`.
+func (t *transformer) isReplicatedAlt(lo, hi int) (varName string, exprLo, exprHi int, condSrc, baseSrc, bindVar string, bindKind arrowKind, okVar string, hasOk bool, bodyLo, bodyHi, closeIdx int, ok bool) {
+	fail := func() (string, int, int, string, string, string, arrowKind, string, bool, int, int, int, bool) {
+		return "", 0, 0, "", "", "", 0, "", false, 0, 0, 0, false
 	}
 	i := lo
 	if i >= hi || t.toks[i].tok != token.IDENT {
@@ -674,6 +711,9 @@ func (t *transformer) isReplicatedAlt(lo, hi int) (varName string, exprLo, exprH
 	}
 	bindVar = t.toks[j].lit
 	j++
+	if src, end, has := t.matchOkTarget(j, innerEnd); has {
+		okVar, hasOk, j = src, true, end
+	}
 	if j >= innerEnd || t.toks[j].tok != token.LBRACE {
 		return fail()
 	}
@@ -686,7 +726,7 @@ func (t *transformer) isReplicatedAlt(lo, hi int) (varName string, exprLo, exprH
 			return fail() // trailing tokens — replicated alt takes exactly one clause
 		}
 	}
-	return varName, exprLo, exprHi, condSrc, baseSrc, bindVar, bindKind, bodyLo, bodyHi, closeIdx, true
+	return varName, exprLo, exprHi, condSrc, baseSrc, bindVar, bindKind, okVar, hasOk, bodyLo, bodyHi, closeIdx, true
 }
 
 // altGuard is one parsed `alt` clause's guard. For every kind except
@@ -698,10 +738,12 @@ func (t *transformer) isReplicatedAlt(lo, hi int) (varName string, exprLo, exprH
 // the index of the clause's opening `{`.
 type altGuard struct {
 	header  string
-	chanSrc string // conditional guards only: the channel expression's source
-	varSrc  string // conditional guards only: the bind target (may be "_")
-	cond    string // conditional guards only: the boolean pre-condition source, e.g. "(len(q) > 0)"
+	chanSrc string    // conditional guards only: the channel expression's source
+	varSrc  string    // conditional guards only: the bind target (may be "_")
+	okSrc   string    // conditional guards only: the comma-ok target, if hasOk (may be "_")
+	cond    string    // conditional guards only: the boolean pre-condition source, e.g. "(len(q) > 0)"
 	kind    arrowKind // conditional guards only: which arrow bound varSrc (non-conditional guards bake this into header already)
+	hasOk   bool      // conditional guards only: whether a comma-ok target was given
 	isCond  bool
 	brace   int
 }
@@ -758,8 +800,19 @@ func (t *transformer) parseAltGuard(lo, hi int) (g altGuard, ok bool) {
 			return altGuard{}, false
 		}
 		rhsLo := arrowEnd
-		rhsEnd, isCall, ok2 := t.parseArrowTarget(rhsLo, hi)
-		if !ok2 || rhsEnd >= hi || t.toks[rhsEnd].tok != token.LBRACE {
+		valEnd, isCall, ok2 := t.parseArrowTarget(rhsLo, hi)
+		if !ok2 {
+			return altGuard{}, false
+		}
+		brace := valEnd
+		var okSrc string
+		var hasOk bool
+		if !isCall {
+			if src, end, has := t.matchOkTarget(valEnd, hi); has {
+				okSrc, hasOk, brace = src, true, end
+			}
+		}
+		if brace >= hi || t.toks[brace].tok != token.LBRACE {
 			return altGuard{}, false
 		}
 		var chanSrc, varSrc string
@@ -769,19 +822,21 @@ func (t *transformer) parseAltGuard(lo, hi int) (g altGuard, ok bool) {
 			// text) — same substitution the unconditional call-shaped
 			// case makes (see below, `chanSrc + "." + callSrc`).
 			chanExprSrc := string(t.src[t.off(t.toks[gLo].pos):t.off(t.toks[lhsEnd].pos)])
-			callSrc := string(t.src[t.off(t.toks[rhsLo].pos):t.off(t.toks[rhsEnd].pos)])
+			callSrc := string(t.src[t.off(t.toks[rhsLo].pos):t.off(t.toks[valEnd].pos)])
 			chanSrc = chanExprSrc + "." + callSrc
 			varSrc = "_"
 		} else {
 			chanSrc = string(t.src[t.off(t.toks[gLo].pos):t.off(t.toks[lhsEnd].pos)])
-			// TrimSpace: the slice runs to the *next* token's start (rhsEnd
-			// is `{`), which can trail whitespace the way `_ ` before `{`
-			// does here — harmless where varSrc only feeds an `=`
+			// TrimSpace: the slice runs to the *next* token's start (valEnd
+			// is `{`/`,`), which can trail whitespace the way `_ ` before
+			// `{` does here — harmless where varSrc only feeds an `=`
 			// assignment, but a blank identifier must compare exactly
 			// equal to "_" below to catch the illegal `_ := ...` case.
-			varSrc = strings.TrimSpace(string(t.src[t.off(t.toks[rhsLo].pos):t.off(t.toks[rhsEnd].pos)]))
+			// okSrc needs no such trim — matchOkTarget captures it via the
+			// token's own literal.
+			varSrc = strings.TrimSpace(string(t.src[t.off(t.toks[rhsLo].pos):t.off(t.toks[valEnd].pos)]))
 		}
-		return altGuard{cond: condSrc, chanSrc: chanSrc, varSrc: varSrc, kind: kind, isCond: true, brace: rhsEnd}, true
+		return altGuard{cond: condSrc, chanSrc: chanSrc, varSrc: varSrc, okSrc: okSrc, hasOk: hasOk, kind: kind, isCond: true, brace: brace}, true
 	}
 	if t.toks[lo].tok == token.IDENT && t.toks[lo].lit == "skip" &&
 		lo+1 < hi && t.toks[lo+1].tok == token.LBRACE {
@@ -816,32 +871,53 @@ func (t *transformer) parseAltGuard(lo, hi int) (g altGuard, ok bool) {
 	rhsLo := arrowEnd
 	chanSrc := string(t.src[t.off(t.toks[lo].pos):t.off(t.toks[lhsEnd].pos)])
 
-	rhsEnd, isCall, ok2 := t.parseArrowTarget(rhsLo, hi)
-	if !ok2 || rhsEnd >= hi || t.toks[rhsEnd].tok != token.LBRACE {
+	valEnd, isCall, ok2 := t.parseArrowTarget(rhsLo, hi)
+	if !ok2 {
+		return altGuard{}, false
+	}
+	brace := valEnd
+	var okSrc string
+	var hasOk bool
+	if !isCall {
+		if src, end, has := t.matchOkTarget(valEnd, hi); has {
+			okSrc, hasOk, brace = src, true, end
+		}
+	}
+	if brace >= hi || t.toks[brace].tok != token.LBRACE {
 		return altGuard{}, false
 	}
 	if isCall {
 		// `c -> Method(args)`: not a bind, a method call on `c` whose
 		// result is received from — e.g. `time -> After(N)` -> `<-time.After(N)`.
-		callSrc := string(t.src[t.off(t.toks[rhsLo].pos):t.off(t.toks[rhsEnd].pos)])
-		return altGuard{header: "case <-" + chanSrc + "." + callSrc + ":", brace: rhsEnd}, true
+		callSrc := string(t.src[t.off(t.toks[rhsLo].pos):t.off(t.toks[valEnd].pos)])
+		return altGuard{header: "case <-" + chanSrc + "." + callSrc + ":", brace: brace}, true
 	}
 	// `chan -> var` assigns into an already-declared var (`case v =
 	// <-chan:`); `chan :-> var` declares it fresh, exactly like Go's own
 	// `case v := <-chan:` (see arrowKind). Both match the Example 1
-	// statement-level `c -> x` / `c :-> x` sugar the same way. `=` is
-	// blank-identifier-safe (`case _ = <-c:` is legal Go), but `:=` is not
-	// (`case _ := <-c:` is "no new variables on left side of :=") —
-	// declaring-and-discarding is meaningless anyway, so `c :-> _` falls
-	// back to a plain discard receive.
-	varSrc := strings.TrimSpace(string(t.src[t.off(t.toks[rhsLo].pos):t.off(t.toks[rhsEnd].pos)]))
+	// statement-level `c -> x` / `c :-> x` sugar the same way. An optional
+	// comma-ok target (`chan -> v, ok` / `chan :-> v, ok`) extends this to
+	// Go's own two-value receive case (`case v, ok = <-chan:` / `case v,
+	// ok := <-chan:`), which `select` supports natively — for detecting a
+	// closed, drained channel. `=` is blank-identifier-safe (`case _ =
+	// <-c:` is legal Go), but `:=` is not (`case _ := <-c:` / `case _, _
+	// := <-c:` are both "no new variables on left side of :=") —
+	// declaring-and-discarding everything is meaningless anyway, so that
+	// combination falls back to a plain discard receive.
+	varSrc := strings.TrimSpace(string(t.src[t.off(t.toks[rhsLo].pos):t.off(t.toks[valEnd].pos)]))
 	switch {
+	case hasOk && kind == arrowDeclare && varSrc == "_" && okSrc == "_":
+		return altGuard{header: "case <-" + chanSrc + ":", brace: brace}, true
+	case hasOk && kind == arrowDeclare:
+		return altGuard{header: fmt.Sprintf("case %s, %s := <-%s:", varSrc, okSrc, chanSrc), brace: brace}, true
+	case hasOk:
+		return altGuard{header: fmt.Sprintf("case %s, %s = <-%s:", varSrc, okSrc, chanSrc), brace: brace}, true
 	case kind == arrowDeclare && varSrc == "_":
-		return altGuard{header: "case <-" + chanSrc + ":", brace: rhsEnd}, true
+		return altGuard{header: "case <-" + chanSrc + ":", brace: brace}, true
 	case kind == arrowDeclare:
-		return altGuard{header: fmt.Sprintf("case %s := <-%s:", varSrc, chanSrc), brace: rhsEnd}, true
+		return altGuard{header: fmt.Sprintf("case %s := <-%s:", varSrc, chanSrc), brace: brace}, true
 	default:
-		return altGuard{header: fmt.Sprintf("case %s = <-%s:", varSrc, chanSrc), brace: rhsEnd}, true
+		return altGuard{header: fmt.Sprintf("case %s = <-%s:", varSrc, chanSrc), brace: brace}, true
 	}
 }
 
@@ -963,33 +1039,48 @@ func (t *transformer) matchArrowCaseDispatch(lo, hi int) (chanSrc, varSrc string
 // matchArrowReceive recognizes `c -> x` or `c :-> x` as a whole statement —
 // sugar for `x = <-c` (assign, `x` already declared) or `x := <-c`
 // (declare, `x` fresh) respectively, read left-to-right rather than Go's
-// receive-flows-right `x = <-c` (see arrowKind). A call-shaped target
-// generalizes this to "receive from a method call on c" instead of
-// "receive into x" — `c -> Method(args)` -> `<-c.Method(args)` (see
-// parseArrowTarget) — an expression statement that evaluates/blocks on the
-// receive and discards the value, same as writing that Go directly (the
-// arrow kind is irrelevant here since there's nothing to bind). Only
-// attempted at statement starts (see isStmtStart), which also rules out
-// `if`/`for` conditions and call arguments — those never follow `;`/`{`.
-func (t *transformer) matchArrowReceive(lo, hi int) (rhsLo, rhsHi, lhsEnd int, kind arrowKind, isCall, ok bool) {
+// receive-flows-right `x = <-c` (see arrowKind). An optional comma-ok
+// suffix (see matchOkTarget) extends this to Go's own two-value receive —
+// `c -> x, ok` / `c :-> x, ok` — for detecting a closed, drained channel.
+// A call-shaped target generalizes the (no-comma-ok) form to "receive from
+// a method call on c" instead of "receive into x" — `c -> Method(args)` ->
+// `<-c.Method(args)` (see parseArrowTarget) — an expression statement that
+// evaluates/blocks on the receive and discards the value, same as writing
+// that Go directly (the arrow kind is irrelevant here since there's
+// nothing to bind). rhsLo/rhsHi bound the primary target only, for text
+// extraction; matchEnd is the index just past the whole construct
+// (primary target, plus the comma-ok suffix if present), for the caller to
+// resume scanning from. Only attempted at statement starts (see
+// isStmtStart), which also rules out `if`/`for` conditions and call
+// arguments — those never follow `;`/`{`.
+func (t *transformer) matchArrowReceive(lo, hi int) (rhsLo, rhsHi, lhsEnd int, kind arrowKind, okSrc string, hasOk bool, matchEnd int, isCall, ok bool) {
 	if !t.isStmtStart(lo) {
-		return 0, 0, 0, 0, false, false
+		return 0, 0, 0, 0, "", false, 0, false, false
 	}
 	lhsEnd, ok = t.parsePrimaryExpr(lo, hi)
 	if !ok {
-		return 0, 0, 0, 0, false, false
+		return 0, 0, 0, 0, "", false, 0, false, false
 	}
 	var arrowEnd int
 	kind, arrowEnd, ok = t.matchArrow(lhsEnd, hi)
 	if !ok {
-		return 0, 0, 0, 0, false, false
+		return 0, 0, 0, 0, "", false, 0, false, false
 	}
 	rhsLo = arrowEnd
 	rhsHi, isCall, ok = t.parseArrowTarget(rhsLo, hi)
-	if !ok || rhsHi >= hi || (t.toks[rhsHi].tok != token.SEMICOLON && t.toks[rhsHi].tok != token.RBRACE) {
-		return 0, 0, 0, 0, false, false
+	if !ok {
+		return 0, 0, 0, 0, "", false, 0, false, false
 	}
-	return rhsLo, rhsHi, lhsEnd, kind, isCall, true
+	matchEnd = rhsHi
+	if !isCall {
+		if src, end, has := t.matchOkTarget(rhsHi, hi); has {
+			okSrc, hasOk, matchEnd = src, true, end
+		}
+	}
+	if matchEnd >= hi || (t.toks[matchEnd].tok != token.SEMICOLON && t.toks[matchEnd].tok != token.RBRACE) {
+		return 0, 0, 0, 0, "", false, 0, false, false
+	}
+	return rhsLo, rhsHi, lhsEnd, kind, okSrc, hasOk, matchEnd, isCall, true
 }
 
 // matchLinkReceive recognizes `link[idx] -> var` as a whole statement —
@@ -1004,14 +1095,15 @@ func (t *transformer) matchArrowReceive(lo, hi int) (rhsLo, rhsHi, lhsEnd int, k
 // target or any chaining past the single index, like `link[idx].field`)
 // and reports the index and bind-variable source separately, so the
 // caller can emit `var = bilink.Recv(idx)` instead of a plain `<-`. Only
-// the assign arrow (`->`) is supported for now — `link[idx] :-> var`
-// (declare) isn't part of this construct yet.
+// the assign arrow (`->`) with no comma-ok suffix is supported for now —
+// `link[idx] :-> var` (declare) and `link[idx] -> var, ok` (comma-ok)
+// aren't part of this construct yet.
 func (t *transformer) matchLinkReceive(lo, hi int) (idxSrc, varSrc string, end int, ok bool) {
 	if lo >= hi || t.toks[lo].tok != token.IDENT || t.toks[lo].lit != "link" {
 		return "", "", 0, false
 	}
-	rhsLo, rhsHi, lhsEnd, kind, isCall, ok := t.matchArrowReceive(lo, hi)
-	if !ok || isCall || kind != arrowAssign {
+	rhsLo, rhsHi, lhsEnd, kind, _, hasOk, matchEnd, isCall, ok := t.matchArrowReceive(lo, hi)
+	if !ok || isCall || kind != arrowAssign || hasOk {
 		return "", "", 0, false
 	}
 	if lo+1 >= hi || t.toks[lo+1].tok != token.LBRACK {
@@ -1024,7 +1116,7 @@ func (t *transformer) matchLinkReceive(lo, hi int) (idxSrc, varSrc string, end i
 	}
 	idxSrc = string(t.src[t.off(t.toks[open+1].pos):t.off(t.toks[close].pos)])
 	varSrc = string(t.src[t.off(t.toks[rhsLo].pos):t.off(t.toks[rhsHi].pos)])
-	return idxSrc, varSrc, rhsHi, true
+	return idxSrc, varSrc, matchEnd, true
 }
 
 // matchLinkSend recognizes `link[idx] <- value` as a whole statement —
@@ -1133,6 +1225,12 @@ func (t *transformer) emitAltClauses(out *bytes.Buffer, lo, hi int) {
 		case cl.g.isCond:
 			ch := fmt.Sprintf("bilGuard%d", idx)
 			switch {
+			case cl.g.hasOk && cl.g.varSrc == "_" && cl.g.okSrc == "_":
+				out.WriteString("case <-" + ch + ":\n")
+			case cl.g.hasOk && cl.g.kind == arrowDeclare:
+				out.WriteString("case " + cl.g.varSrc + ", " + cl.g.okSrc + " := <-" + ch + ":\n")
+			case cl.g.hasOk:
+				out.WriteString("case " + cl.g.varSrc + ", " + cl.g.okSrc + " = <-" + ch + ":\n")
 			case cl.g.varSrc == "_":
 				out.WriteString("case <-" + ch + ":\n")
 			case cl.g.kind == arrowDeclare:
@@ -1216,6 +1314,12 @@ func (t *transformer) emitPriAltClauses(out *bytes.Buffer, lo, hi int) {
 		fmt.Fprintf(out, "%s := %s\n", ch, cl.g.chanSrc)
 		fmt.Fprintf(out, "if !%s {\n\t%s = nil\n}\n", cl.g.cond, ch)
 		switch {
+		case cl.g.hasOk && cl.g.varSrc == "_" && cl.g.okSrc == "_":
+			cl.header = "case <-" + ch + ":"
+		case cl.g.hasOk && cl.g.kind == arrowDeclare:
+			cl.header = "case " + cl.g.varSrc + ", " + cl.g.okSrc + " := <-" + ch + ":"
+		case cl.g.hasOk:
+			cl.header = "case " + cl.g.varSrc + ", " + cl.g.okSrc + " = <-" + ch + ":"
 		case cl.g.varSrc == "_":
 			cl.header = "case <-" + ch + ":"
 		case cl.g.kind == arrowDeclare:
@@ -1300,22 +1404,33 @@ func (t *transformer) transform(lo, hi int) []byte {
 
 		case tk.tok == token.IDENT && tk.lit == "alt" &&
 			i+1 < hi && t.toks[i+1].tok == token.IDENT:
-			// `alt VAR := range EXPR { [(COND) &&] BASE[VAR] -> BIND { BODY }
-			// }` — replicated alt, attached directly to `alt` — see
-			// isReplicatedAlt. Guarded, it first builds a per-replica
+			// `alt VAR := range EXPR { [(COND) &&] BASE[VAR] -> BIND[, OK]
+			// { BODY } }` — replicated alt, attached directly to `alt` —
+			// see isReplicatedAlt. Guarded, it first builds a per-replica
 			// []bool by evaluating COND once per index — VAR is re-bound
 			// each iteration, so COND can reference it (`guards[j]`,
 			// `len(q[j]) > 0`, ...) — then passes that to altN, which nils
 			// out any replica whose guard came back false (see
-			// altNHelper). BIND's arrow picks how altN's result lands:
-			// `:-> BIND` (declare) desugars straight to `j, v := altN(...)`
-			// — BID must not already exist. `-> BIND` (assign) needs BIND
-			// to already exist, but VAR (the winning replica index) is
-			// still a fresh per-dispatch value with no occam equivalent,
-			// and Go can't declare one return value while assigning the
-			// other in a single `:=`/`=` statement — so that case routes
-			// through a throwaway pair instead (see below).
-			varName, exprLo, exprHi, condSrc, baseSrc, bindVar, bindKind, bodyLo, bodyHi, closeIdx, ok := t.isReplicatedAlt(i+1, hi)
+			// altNHelper). altN always returns three values now (index,
+			// payload, recvOK — see altNHelper); every desugar below
+			// captures all three into fixed throwaway names first
+			// (bilIdx/bilVal/bilOk), then binds each into its real target
+			// or discards it with `_ = bilX` when the .bil source didn't
+			// ask for it (OK only matters when a comma-ok target was
+			// given). VAR always declares fresh (`:=`) regardless of
+			// BIND's arrow — it's the construct's own per-dispatch replica
+			// index, nothing outside this block could have predeclared it,
+			// and that's independent of whether BIND/OK themselves are
+			// being declared or assigned. BIND and OK, by contrast, always
+			// share BIND's own op (`:=` for `:->`, `=` for `->` — one op
+			// for both, since a single Go statement can't mix `:=` and
+			// `=`). Routing every case through the same three throwaway
+			// names — rather than a direct `j, v := altN(...)` for the
+			// simple declare case — also sidesteps Go's "no new variables
+			// on left side of :=" the moment BIND and OK are *both* `_`
+			// under `:->`: an all-blank direct declare there would
+			// otherwise be illegal, and this way it isn't a special case.
+			varName, exprLo, exprHi, condSrc, baseSrc, bindVar, bindKind, okVar, hasOk, bodyLo, bodyHi, closeIdx, ok := t.isReplicatedAlt(i+1, hi)
 			if !ok {
 				panic(fmt.Sprintf("unsupported alt shape at %q (%v)", t.toks[i+1].lit, t.toks[i+1].tok))
 			}
@@ -1329,33 +1444,47 @@ func (t *transformer) transform(lo, hi int) []byte {
 				out.WriteString("}\n")
 				altCall = "altN(" + baseSrc + ", bilGuards...)"
 			}
-			switch {
-			case bindKind == arrowDeclare:
-				out.WriteString(varName + ", " + bindVar + " := " + altCall + "\n")
-			case varName == "_":
-				out.WriteString("_, bilVal := " + altCall + "\n")
-				out.WriteString(bindVar + " = bilVal\n")
-			default:
-				out.WriteString("bilIdx, bilVal := " + altCall + "\n")
-				out.WriteString(varName + " := bilIdx\n")
-				out.WriteString(bindVar + " = bilVal\n")
-			}
+			out.WriteString("bilIdx, bilVal, bilOk := " + altCall + "\n")
+			// VAR is always freshly declared here, regardless of BIND's
+			// arrow kind: it's the construct's own per-dispatch replica
+			// index, with no occam equivalent and nothing outside this
+			// block that could have predeclared it. `chans[j]` in the
+			// source is what tells isReplicatedAlt which array to alt
+			// over, but that indexing expression itself never survives
+			// into the output (only the bare array does, as altN's
+			// argument), so from the emitted Go's point of view `j` is a
+			// fresh binding the body may or may not go on to reference —
+			// the extra `_ = j` unconditionally silences "declared and not
+			// used" rather than only when the body happens not to
+			// reference VAR (confirmed by hitting exactly that compile
+			// error on `alt j := range n { chans[j] -> v { println(v) } }`
+			// before this safety net existed).
 			if varName != "_" {
-				// `chans[j]` in the source is what tells isReplicatedAlt
-				// which array to alt over — but that indexing expression
-				// itself never survives into the output (only the bare
-				// array does, as altN's argument), so from the emitted
-				// Go's point of view `j` is a fresh binding the body may or
-				// may not go on to reference. Silence "declared and not
-				// used" unconditionally rather than only when the body
-				// happens not to reference VAR: writing `chans[j]` already
-				// reads as "using" j, and it would be surprising if
-				// whether that compiles depended on what the body does
-				// with it (confirmed by hitting exactly this compile error
-				// on `alt j := range n { chans[j] -> v { println(v) } }`).
-				// A redundant `_ = j` is harmless even when the body does
-				// reference VAR too.
+				out.WriteString(varName + " := bilIdx\n")
 				out.WriteString("_ = " + varName + "\n")
+			} else {
+				out.WriteString("_ = bilIdx\n")
+			}
+			// BIND and OK, by contrast, follow BIND's own arrow: `:->`
+			// declares both fresh, `->` assigns into both (already
+			// declared outside) — same op for both, since Go can't mix
+			// `:=` and `=` in one statement.
+			op := "="
+			if bindKind == arrowDeclare {
+				op = ":="
+			}
+			bindTemp := func(target, temp string) {
+				if target == "_" {
+					out.WriteString("_ = " + temp + "\n")
+				} else {
+					out.WriteString(target + " " + op + " " + temp + "\n")
+				}
+			}
+			bindTemp(bindVar, "bilVal")
+			if hasOk {
+				bindTemp(okVar, "bilOk")
+			} else {
+				out.WriteString("_ = bilOk\n")
 			}
 			out.Write(t.transform(bodyLo, bodyHi))
 			out.WriteString("\n}")
@@ -1459,13 +1588,15 @@ func (t *transformer) transform(lo, hi int) []byte {
 				out.WriteString("}")
 				cursor = t.off(t.toks[closeIdx].pos) + 1
 				i = closeIdx + 1
-			} else if rhsLo, rhsHi, lhsEnd, kind, isCall, ok := t.matchArrowReceive(i, hi); ok {
+			} else if rhsLo, rhsHi, lhsEnd, kind, okSrc, hasOk, matchEnd, isCall, ok := t.matchArrowReceive(i, hi); ok {
 				flushTo(t.off(tk.pos))
 				// TrimSpace: the slice runs to the *next* token's start
-				// (rhsHi is `;`/`}`), which can trail whitespace — harmless
-				// where varSrc only feeds an `=` assignment, but a blank
-				// identifier must compare exactly equal to "_" below to
-				// catch the illegal `_ := ...` case.
+				// (rhsHi is `;`/`}`/`,`), which can trail whitespace —
+				// harmless where varSrc only feeds an `=` assignment, but a
+				// blank identifier must compare exactly equal to "_" below
+				// to catch the illegal `_ := ...` / `_, _ := ...` cases.
+				// okSrc needs no such trim — matchOkTarget captures it via
+				// the token's own literal, not a position slice.
 				varSrc := strings.TrimSpace(string(t.src[t.off(t.toks[rhsLo].pos):t.off(t.toks[rhsHi].pos)]))
 				chanSrc := t.src[t.off(tk.pos):t.off(t.toks[lhsEnd].pos)]
 				switch {
@@ -1474,6 +1605,24 @@ func (t *transformer) transform(lo, hi int) []byte {
 					out.Write(chanSrc)
 					out.WriteString(".")
 					out.WriteString(varSrc)
+				case hasOk && kind == arrowDeclare && varSrc == "_" && okSrc == "_":
+					// `_, _ := <-c` isn't legal Go (no new variables on the
+					// left of :=) — declaring and discarding both is
+					// meaningless anyway, so fall back to a plain discard.
+					out.WriteString("<-")
+					out.Write(chanSrc)
+				case hasOk && kind == arrowDeclare:
+					out.WriteString(varSrc)
+					out.WriteString(", ")
+					out.WriteString(okSrc)
+					out.WriteString(" := <-")
+					out.Write(chanSrc)
+				case hasOk:
+					out.WriteString(varSrc)
+					out.WriteString(", ")
+					out.WriteString(okSrc)
+					out.WriteString(" = <-")
+					out.Write(chanSrc)
 				case kind == arrowDeclare && varSrc == "_":
 					// `_ := <-c` isn't legal Go ("no new variables on left
 					// side of :="; _ never counts as new) — declaring and
@@ -1490,8 +1639,8 @@ func (t *transformer) transform(lo, hi int) []byte {
 					out.WriteString(" = <-")
 					out.Write(chanSrc)
 				}
-				cursor = t.off(t.toks[rhsHi].pos)
-				i = rhsHi
+				cursor = t.off(t.toks[matchEnd].pos)
+				i = matchEnd
 			} else {
 				i++
 			}

@@ -1,0 +1,25 @@
+package main
+
+// Comma-ok receive, assign form: `c -> v, ok` assigns into already-declared
+// v/ok, mirroring Go's own `v, ok = <-c`.
+
+proc sender(c chan<- int) {
+	c <- 7
+	close(c)
+}
+
+func main() {
+	c := make(chan int)
+	var v int
+	var ok bool
+
+	par {
+		sender(c)
+		seq {
+			c -> v, ok
+			println(v, ok)
+			c -> v, ok
+			println(v, ok)
+		}
+	}
+}

@@ -1,0 +1,27 @@
+package main
+
+// Comma-ok in a replicated alt guard. altN's third return value is
+// reflect.Select's own recvOK (see altNHelper) — this proves it actually
+// reaches the bind site rather than being silently discarded.
+
+proc sender(c chan<- int) {
+	c <- 5
+	close(c)
+}
+
+func main() {
+	chans := makeChans[int](1)
+
+	par {
+		sender(chans[0])
+		seq {
+			for range 2 {
+				alt i := range 1 {
+					chans[i] :-> v, ok {
+						println(i, v, ok)
+					}
+				}
+			}
+		}
+	}
+}

@@ -12,8 +12,8 @@ func main() {
 	par {
 		sender(b)
 		seq {
-			i, v := altN(chans)
-			println(i, v)
+			i, v, ok := altN(chans)
+			println(i, v, ok)
 		}
 	}
 }

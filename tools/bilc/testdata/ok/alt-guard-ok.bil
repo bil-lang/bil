@@ -1,0 +1,26 @@
+package main
+
+// Comma-ok in a simple alt guard: Go's `select` supports a two-value case
+// (`case v, ok := <-c:`) natively, so this is pure sugar over that.
+
+proc sender(c chan<- int) {
+	c <- 9
+	close(c)
+}
+
+func main() {
+	c := make(chan int)
+
+	par {
+		sender(c)
+		seq {
+			for range 2 {
+				alt {
+					c :-> v, ok {
+						println(v, ok)
+					}
+				}
+			}
+		}
+	}
+}
