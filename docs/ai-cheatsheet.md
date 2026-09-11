@@ -19,7 +19,6 @@ The `.bil` file extension is used; a file starts `package main` exactly like Go.
 | `chan -> x, ok` | **Comma-ok, assign**: `c -> x, ok` means `x, ok = <-c` — Go's own two-value receive. `ok` is `false` exactly when `c` is closed and drained; both `x` and `ok` must already be declared. Either side may be `_`. | `c -> x, ok` |
 | `chan :-> x, ok` | **Comma-ok, declare**: `c :-> x, ok` means `x, ok := <-c`, both fresh. Works in every context the single-value form does — a bare statement, an `alt` guard, or a replicated `alt` guard. `close(c)` is plain Go, not a Bil keyword; this is what lets you actually observe it. | `c :-> x, ok` |
 | `chan -> Method(args)` | Receive on a call-shaped right side. | `time -> After(d)` |
-| `chan -> case v { T1 { ... } T2 { ... } }` | Receive-and-type-switch on a tagged/variant payload. No `case`/`:` token inside each clause. Always declares `v` fresh (Go's type-switch has no assignment form) — `->`/`:->` doesn't apply here. | see pattern 4 below |
 | `alt { g1 { ... } g2 { ... } }` | Wait for whichever guard becomes ready first, then run that body (like `select`, but guards read `chan -> target { body }` / `chan :-> target { body }`, not `case x := <-chan:`). | see pattern 3 below |
 | `(cond) && chan -> x { ... }` | A conditional guard inside `alt` — only eligible when `cond` is true. `-> `/`:->` both work here, same assign/declare rule. | `(len(q)>0) && req -> _ { ... }` |
 | `alt i := range N { ... }` | Replicated `alt` — one process listening across a runtime-sized set of channels at once. The bind target follows the same `-> `/`:->` choice as any other receive — `i` (the replica index) is always fresh either way. | `alt i := range nClients { chans[i] :-> v { ... } }` |
@@ -112,7 +111,7 @@ proc poller(c <-chan int) {
 }
 ```
 
-**4. Tagged/variant channel protocol (`-> case`)**
+**4. Tagged/variant channel protocol**
 ```go
 package main
 
@@ -124,13 +123,11 @@ func (Info) isMsg() {}
 func (Warn) isMsg() {}
 
 proc logReceiver(in <-chan Msg) {
-	in -> case v {
-		Info {
-			println("info", v.Code)
-		}
-		Warn {
-			println("warn", v.Code)
-		}
+	switch v := (<-in).(type) {
+	case Info:
+		println("info", v.Code)
+	case Warn:
+		println("warn", v.Code)
 	}
 }
 ```

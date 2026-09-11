@@ -292,7 +292,7 @@ graph LR
 
 ### Example 5: Channel protocols
 
-Typed, structured messages over a _channel_, including variant/tagged protocols (`-> case`). Everything sent so far has been a bare `int`/`bool`; first example needing compound data and message-shape checking. Two independent demos, run one after the other (not concurrently — see design notes for why): a `Point` protocol (`X`, `Y` sent together as one atomic message) shows the plain structured case; a `LogMsg` protocol (tagged `Info`/`Warn`, each carrying an `INT`) shows the variant case.
+Typed, structured messages over a _channel_, including variant/tagged protocols dispatched with a plain Go type-switch. Everything sent so far has been a bare `int`/`bool`; first example needing compound data and message-shape checking. Two independent demos, run one after the other (not concurrently — see design notes for why): a `Point` protocol (`X`, `Y` sent together as one atomic message) shows the plain structured case; a `LogMsg` protocol (tagged `Info`/`Warn`, each carrying an `INT`) shows the variant case.
 
 ```go
 package main
@@ -338,13 +338,11 @@ proc logSender(out chan<- LogMsg) {
 
 proc logReceiver(in <-chan LogMsg) {
 	for range 3 {
-		in -> case v {
-			Info {
-				println("info", v.Code)
-			}
-			Warn {
-				println("warn", v.Code)
-			}
+		switch v := (<-in).(type) {
+		case Info:
+			println("info", v.Code)
+		case Warn:
+			println("warn", v.Code)
 		}
 	}
 }
@@ -748,10 +746,6 @@ Bil implementaion of occam's useful pair: `skip` terminates immediately (does no
 A `skip {}` block also acts as the default guard for an `alt` - if no channel is ready, then the skip blocks is executed. A `skip` statement simply gets dropped.
 
 `stop` rewrites to `time.Sleep(1<<63 - 1)` rather than `select{}`, since Go's runtime treats `select{}` as provably permanent and panics if it's ever the last live goroutine; a pending timer isn't, so it can sit there indefinitely without crashing.
-
-#### `-> case`
-
-Receive-and-type-dispatch, for a tagged protocol payload: `c -> case v {Type1 {X} Type2 {Y}}` desugars to a real Go type-switch, `switch v := (<-c).(type) { case Type1: X; case Type2: Y }`. The `case` here isn't ordinary Go `case` reused normally — Go's own only ever appears inside a `switch`/`select` body as `case EXPR:`; this one sits right after the arrow, before the bind variable, and each clause is just `TypeName { body }` with no `case`/`:` of its own.
 
 ---
 

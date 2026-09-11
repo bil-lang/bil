@@ -1008,69 +1008,6 @@ func (t *transformer) isStmtStart(i int) bool {
 	return i == 0 || t.toks[i-1].tok == token.SEMICOLON || t.toks[i-1].tok == token.LBRACE
 }
 
-// caseClause is one `TypeExpr { body }` clause inside a `chan -> case v {
-// ... }` block: [typeLo, typeHi) is the type name's token range, [bodyLo,
-// bodyHi) is the clause body's.
-type caseClause struct {
-	typeLo, typeHi, bodyLo, bodyHi int
-}
-
-// matchArrowCaseDispatch recognizes `chan -> case v { Type1 { body1 } Type2
-// { body2 } ... }` as a whole statement — a variant/tagged protocol
-// receive (Example 9), fusing a receive with a type-based dispatch into
-// one construct the same way `alt`'s `chan -> var { body }` fuses a receive
-// with a channel-based one. Desugars to a single Go type switch: `switch v
-// := (<-chan).(type) { case Type1: body1 case Type2: body2 }`. `v` is
-// named once, right after `case`, not per clause — Go's type switch only
-// ever has one bound variable shared by every case, a hard constraint of
-// the underlying construct, not a Bil choice.
-func (t *transformer) matchArrowCaseDispatch(lo, hi int) (chanSrc, varSrc string, cases []caseClause, closeIdx int, ok bool) {
-	if !t.isStmtStart(lo) {
-		return "", "", nil, 0, false
-	}
-	if lo < hi && t.toks[lo].tok == token.IDENT && t.toks[lo].lit == "link" {
-		return "", "", nil, 0, false // see matchLinkReceive; not a real channel, no tagged-protocol dispatch
-	}
-	lhsEnd, ok1 := t.parsePrimaryExpr(lo, hi)
-	if !ok1 || lhsEnd+1 >= hi || t.toks[lhsEnd].tok != token.SUB || t.toks[lhsEnd+1].tok != token.GTR ||
-		t.off(t.toks[lhsEnd+1].pos) != t.off(t.toks[lhsEnd].pos)+1 {
-		return "", "", nil, 0, false
-	}
-	i := lhsEnd + 2
-	if i >= hi || t.toks[i].tok != token.CASE {
-		return "", "", nil, 0, false
-	}
-	i++
-	if i >= hi || t.toks[i].tok != token.IDENT {
-		return "", "", nil, 0, false
-	}
-	varSrc = t.toks[i].lit
-	i++
-	if i >= hi || t.toks[i].tok != token.LBRACE {
-		return "", "", nil, 0, false
-	}
-	blockClose := matchBrace(t.toks, i)
-	j := i + 1
-	for j < blockClose {
-		if t.toks[j].tok == token.SEMICOLON {
-			j++
-			continue
-		}
-		typeEnd, okT := t.parsePrimaryExpr(j, blockClose)
-		if !okT || typeEnd >= blockClose || t.toks[typeEnd].tok != token.LBRACE {
-			return "", "", nil, 0, false
-		}
-		bodyClose := matchBrace(t.toks, typeEnd)
-		cases = append(cases, caseClause{typeLo: j, typeHi: typeEnd, bodyLo: typeEnd + 1, bodyHi: bodyClose})
-		j = bodyClose + 1
-	}
-	if len(cases) == 0 {
-		return "", "", nil, 0, false
-	}
-	chanSrc = string(t.src[t.off(t.toks[lo].pos):t.off(t.toks[lhsEnd].pos)])
-	return chanSrc, varSrc, cases, blockClose, true
-}
-
 // matchArrowReceive recognizes `c -> x` or `c :-> x` as a whole statement —
 // sugar for `x = <-c` (assign, `x` already declared) or `x := <-c`
 // (declare, `x` fresh) respectively, read left-to-right rather than Go's
@@ -1631,17 +1568,6 @@ func (t *transformer) transform(lo, hi int) []byte {
 				cursor = t.off(t.toks[end].pos)
 				i = end
 				t.usedLink = true
-			} else if chanSrc, varSrc, cases, closeIdx, ok := t.matchArrowCaseDispatch(i, hi); ok {
-				flushTo(t.off(tk.pos))
-				out.WriteString("switch " + varSrc + " := (<-" + chanSrc + ").(type) {\n")
-				for _, c := range cases {
-					out.WriteString("case " + string(t.src[t.off(t.toks[c.typeLo].pos):t.off(t.toks[c.typeHi].pos)]) + ":\n")
-					out.Write(t.transform(c.bodyLo, c.bodyHi))
-					out.WriteString("\n")
-				}
-				out.WriteString("}")
-				cursor = t.off(t.toks[closeIdx].pos) + 1
-				i = closeIdx + 1
 			} else if rhsLo, rhsHi, lhsEnd, kind, okSrc, hasOk, matchEnd, isCall, ok := t.matchArrowReceive(i, hi); ok {
 				flushTo(t.off(tk.pos))
 				// TrimSpace: the slice runs to the *next* token's start
