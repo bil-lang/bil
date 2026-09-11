@@ -18,7 +18,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	out, err := bilc.Transform(src)
+	out, err := bilc.Transform(os.Args[1], src)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "transform error:", err)
 		os.Exit(1)

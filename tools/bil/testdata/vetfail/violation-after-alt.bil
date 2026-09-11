@@ -1,0 +1,28 @@
+package main
+
+func main() {
+
+	q := 5
+	c := make(chan int)
+
+	alt {
+		(q > 0) && c :-> v {
+			println(v)
+		}
+		skip {
+			println("skip")
+		}
+	}
+
+	d := make(chan int)
+
+	par {
+		seq {
+			d <- 1
+		}
+		seq {
+			d <- 2
+		}
+	}
+
+}

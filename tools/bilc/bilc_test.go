@@ -2,6 +2,7 @@ package bilc
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,7 +29,7 @@ func TestOK(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			out, err := Transform(src)
+			out, err := Transform(bilFile, src)
 			if err != nil {
 				t.Fatalf("Transform: %v", err)
 			}
@@ -92,7 +93,7 @@ func TestErr(t *testing.T) {
 			}
 			wantStr := strings.TrimSpace(string(want))
 
-			_, err = Transform(src)
+			_, err = Transform(bilFile, src)
 			if err == nil {
 				t.Fatalf("Transform succeeded, want error containing %q", wantStr)
 			}
@@ -138,7 +139,7 @@ func main() {
 	}
 }
 `)
-	out, err := Transform(src)
+	out, err := Transform("test.bil", src)
 	if err != nil {
 		t.Fatalf("Transform: %v (if this now fails, a static check has closed the gap — replace this test with an err/ fixture instead)", err)
 	}
@@ -172,7 +173,7 @@ proc idle() {
 func main() {
 }
 `)
-	out, err := Transform(src)
+	out, err := Transform("test.bil", src)
 	if err != nil {
 		t.Fatalf("Transform: %v", err)
 	}
@@ -200,7 +201,7 @@ func main() {
 	// runtime would kill almost instantly here) and confirm it's still
 	// running, not crashed, after a short wait.
 	soloSrc := []byte("package main\n\nfunc main() {\n\tstop\n}\n")
-	soloOut, err := Transform(soloSrc)
+	soloOut, err := Transform("test.bil", soloSrc)
 	if err != nil {
 		t.Fatalf("Transform (solo): %v", err)
 	}
@@ -253,7 +254,7 @@ func main() {
 	node()
 }
 `)
-	out, err := Transform(src)
+	out, err := Transform("test.bil", src)
 	if err != nil {
 		t.Fatalf("Transform: %v", err)
 	}
@@ -284,12 +285,60 @@ func main() {
 	node()
 }
 `)
-	out2, err := Transform(srcWithImport)
+	out2, err := Transform("test.bil", srcWithImport)
 	if err != nil {
 		t.Fatalf("Transform (pre-imported): %v", err)
 	}
 	if n := strings.Count(string(out2), `"emulator/nodeprog/bilink"`); n != 1 {
 		t.Errorf("expected exactly one bilink import, got %d in:\n%s", n, out2)
+	}
+}
+
+// TestLineDirectives checks that Transform's `//line` directives (see
+// resync in bilc.go) correctly map error positions in the transpiled Go
+// back to the original .bil file and line — the mechanism tools/vet and
+// `go run` both rely on to report positions in terms of .bil source
+// rather than the generated Go. The guarded alt here injects several
+// lines of synthetic setup (bilGuard0 := ...; if !cond {...}; select
+// {...}) ahead of the underlying select, which is exactly the kind of
+// line-count drift resync exists to correct for; the fixture's line
+// numbers are load-bearing (see the inline comments) — if this literal
+// source string is ever reformatted, wantLine must be updated to match.
+func TestLineDirectives(t *testing.T) {
+	const filename = "line-directive-test.bil"
+	src := []byte(`package main
+
+func main() {
+	q := 5
+	c := make(chan int)
+
+	alt {
+		(q > 0) && c :-> v {
+			println(v)
+		}
+		skip {
+			println("skip")
+		}
+	}
+
+	println("after")
+}
+`)
+	const wantLine = 16 // the "println(\"after\")" line, above
+
+	out, err := Transform(filename, src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+
+	abs, err := filepath.Abs(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("//line %s:%d\n\tprintln(\"after\")", abs, wantLine)
+	got := string(out)
+	if !strings.Contains(got, want) {
+		t.Errorf("expected %q immediately before the post-alt statement, got:\n%s", want, got)
 	}
 }
 

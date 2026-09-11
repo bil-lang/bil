@@ -632,7 +632,7 @@ tools/bil/bil run examples/01-twoprocs.bil
 `bil run` chains together Bil's two internal tools, failing at the first step that doesn't pass rather than running anything it hasn't checked:
 
 1. **`tools/bilc`** — a source-to-source preprocessor (a _transpiler_) that uses `go/scanner` and `go/token` to parse Bil code, apply certain heuristic rules and to provide a set of helper functions. Finally, it uses `go/format` to translate the `.bil` file into legal Go.
-2. **`tools/vet`** — a `go/ast`/`go/types`-based static analyzer that checks the transpiled Go against Bil's usage rules (for example: a channel may only be used for input in one `par` branch, and output in one other). A violation is reported and the program is **not** run; positions currently point at the transpiled Go, not the `.bil` source, since `bilc` doesn't emit a source map back yet.
+2. **`tools/vet`** — a `go/ast`/`go/types`-based static analyzer that checks the transpiled Go against Bil's usage rules (for example: a channel may only be used for input in one `par` branch, and output in one other). A violation is reported and the program is **not** run; `bilc` embeds `//line` directives in the transpiled Go mapping it back to the original `.bil` file and line, so reported positions — and any `go run` compile error or panic — name the `.bil` source, not the generated Go.
 3. Only if that passes: calls `go run` on the transpiled Go.
 
 To run steps 1–2 only, without executing the program, use `bil vet` instead of `bil run`.

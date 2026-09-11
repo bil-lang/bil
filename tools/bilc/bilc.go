@@ -9,6 +9,7 @@ import (
 	"go/format"
 	"go/scanner"
 	"go/token"
+	"path/filepath"
 	"strings"
 )
 
@@ -250,6 +251,40 @@ func tokenize(filename string, src []byte) *transformer {
 }
 
 func (t *transformer) off(p token.Pos) int { return t.file.Offset(p) }
+
+// resync writes a `//line` directive into out mapping whatever comes next
+// back to offset's true position in the original .bil source — see
+// flushTo in transform, the only call site. This is what lets error
+// positions from a later go/parser-based read of the transpiled Go (both
+// tools/vet's own AST walk and any go run compile error or panic) point at
+// the .bil file and line instead of the generated Go file, without bilc
+// having to track cumulative line drift itself: since t.file already
+// knows the true line for any offset regardless of how much synthetic
+// text came before, re-anchoring unconditionally before every verbatim
+// copy is trivially correct under arbitrary nesting for free, and needs
+// no changes to any of the emit*/desugar functions that call flushTo
+// (directly, or via a nested transform whose own flushTo does the same).
+// go/scanner only recognizes a `//line` comment as a directive when its
+// `//` is the very first byte of its physical line — no leading
+// whitespace, ever — so out must already be at a fresh line start before
+// the directive is written; go/printer has a matching carve-out that
+// preserves exactly this shape through a go/format.Source round-trip.
+func (t *transformer) resync(out *bytes.Buffer, offset int) {
+	// The leading "\n" is unconditional, not just "if out doesn't already
+	// end in one": transform recurses (par/seq/alt branches, ...), and a
+	// nested call's returned []byte gets spliced straight into its
+	// caller's out build up — often right after caller-written text with
+	// no trailing newline of its own (e.g. seq's own out.WriteString("{")).
+	// The nested call's *own* buffer has no way to know that at the time
+	// its first flushTo/resync runs (it may still be empty), so it must
+	// always open its own fresh line rather than trusting whatever
+	// preceded it once spliced in — an extra blank line where one turns
+	// out to be unnecessary is harmless; a directive left glued to
+	// preceding text on the same line is not (go/scanner only honors
+	// `//line` when it is the first byte of its physical line).
+	pos := t.file.Position(t.file.Pos(offset))
+	fmt.Fprintf(out, "\n//line %s:%d\n", pos.Filename, pos.Line)
+}
 
 func matchBrace(toks []tok, open int) int {
 	depth := 0
@@ -1353,8 +1388,27 @@ func (t *transformer) transform(lo, hi int) []byte {
 	var out bytes.Buffer
 	cursor := t.off(t.toks[lo].pos)
 	flushTo := func(o int) {
-		out.Write(t.src[cursor:o])
-		cursor = o
+		// Resync before every individual *line* in [cursor, o), not once
+		// for the whole span: go/format.Source's own gofmt-style
+		// normalization collapses a run of 2+ consecutive blank source
+		// lines down to 1 in its formatted output, silently invalidating
+		// any line-count arithmetic that spans such a run (confirmed:
+		// without this, code following a blank-line gap the transformer
+		// itself didn't introduce — ordinary blank lines already present
+		// in the .bil source — resynced one line short after formatting).
+		// A directive immediately ahead of every line, blank or not,
+		// sidesteps that: gofmt is free to delete however many blank
+		// lines it likes, since no surviving non-blank line's mapping
+		// ever depends on counting through them — each carries its own.
+		for cursor < o {
+			end := o
+			if nl := bytes.IndexByte(t.src[cursor:o], '\n'); nl >= 0 {
+				end = cursor + nl + 1
+			}
+			t.resync(&out, cursor)
+			out.Write(t.src[cursor:end])
+			cursor = end
+		}
 	}
 	i := lo
 	for i < hi {
@@ -1726,8 +1780,22 @@ func (t *transformer) checkNoBufferedChannels() error {
 	return nil
 }
 
-func Transform(src []byte) ([]byte, error) {
-	t := tokenize("source.bil", src)
+func Transform(filename string, src []byte) ([]byte, error) {
+	// Absolute, not whatever filename came in as: the `//line` directives
+	// resync writes (see resync) end up in a Go file that go/parser reads
+	// from a different directory entirely (bil run's os.CreateTemp lands
+	// in os.TempDir(), not alongside the .bil source) — go/scanner
+	// resolves a *relative* //line filename against the directory of the
+	// file containing the directive, not the caller's original working
+	// directory, so a relative .bil path here would silently resolve to a
+	// nonexistent path under the temp directory instead of the real .bil
+	// file. filepath.Abs only errors if os.Getwd fails, which nothing
+	// downstream could recover from either; fall back to the given
+	// filename as-is rather than failing the whole transform over it.
+	if abs, err := filepath.Abs(filename); err == nil {
+		filename = abs
+	}
+	t := tokenize(filename, src)
 	for _, tk := range t.toks {
 		if tk.tok == token.IDENT && tk.lit == "altN" {
 			t.usedAltN = true
@@ -1752,10 +1820,31 @@ func Transform(src []byte) ([]byte, error) {
 
 	// Inject `import "sync"` right after the package clause, and append the
 	// par helper at the end of the file (see parHelper's comment for why).
-	pkgEnd := bytes.IndexByte(body, '\n')
-	if pkgEnd < 0 {
-		pkgEnd = len(body)
+	// pkgStart skips past whatever transform's first flushTo call resync'd
+	// ahead of the package clause itself (see resync: a blank line, then a
+	// `//line ...` directive) to find where "package main" actually
+	// starts, so pkgEnd lands on the newline that ends *that* line rather
+	// than one of the lines preceding it — landing early would sever the
+	// leading directive from "package main" (illegal: nothing may precede
+	// `package`) when the import/build-tag injection below splices in
+	// between them.
+	pkgStart := 0
+	for {
+		lineEnd := bytes.IndexByte(body[pkgStart:], '\n')
+		if lineEnd < 0 {
+			break
+		}
+		line := body[pkgStart : pkgStart+lineEnd]
+		if len(line) != 0 && !bytes.HasPrefix(line, []byte("//line ")) {
+			break
+		}
+		pkgStart += lineEnd + 1
 	}
+	pkgEnd := bytes.IndexByte(body[pkgStart:], '\n')
+	if pkgEnd < 0 {
+		pkgEnd = len(body) - pkgStart
+	}
+	pkgEnd += pkgStart
 	var full bytes.Buffer
 	if t.usedLink {
 		// bilink only exists under this build constraint (it's backed by

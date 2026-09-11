@@ -50,7 +50,7 @@ func runCmd(src string, execute bool, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	out, err := bilc.Transform(in)
+	out, err := bilc.Transform(src, in)
 	if err != nil {
 		fmt.Fprintln(stderr, "transform error:", err)
 		return 1
@@ -82,7 +82,7 @@ func runCmd(src string, execute bool, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, m)
 		}
 		if execute {
-			fmt.Fprintf(stderr, "\nbil: static analysis failed for %s — not running (see violation(s) above; positions refer to the transpiled Go, not the .bil source)\n", src)
+			fmt.Fprintf(stderr, "\nbil: static analysis failed for %s — not running (see violation(s) above)\n", src)
 		}
 		return 1
 	}

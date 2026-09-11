@@ -1,0 +1,20 @@
+package main
+
+func main() {
+
+	q := 5
+	c := make(chan int)
+
+	alt {
+		(q > 0) && c :-> v {
+			println(v)
+		}
+		skip {
+			println("skip")
+		}
+	}
+
+	var x int = "not a number"
+	println(x)
+
+}
