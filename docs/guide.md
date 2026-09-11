@@ -53,6 +53,7 @@ Follow the installation and run code instructions in [Getting Started](#bil-star
   - [Getting Started](#bil-start)
   - [Bil Features](#bil-features)
   - [Bil Checks](#bil-checks)
+  - [AI Cheatsheet](#ai-cheatsheet)
 - [Section III: Hinterland](#section-iii)
   - [The Bil Project](#bil-project)
   - [Bil Rationale](#bil-rationale)
@@ -498,7 +499,7 @@ graph LR
 
 ### Example 8: Replicated alternation (many-to-one server)
 
-`alt _ := range nClients` — one process listening across N channels at once. `nClients = 3` clients each send `perClient = 2` requests on their own channel; one `server` process `alt`s across all 3 channels at once, printing whatever arrives, until it's received all 6 — a many-to-one fan-in.
+`alt _ := range nClients` — one process listening across N channels at once. `nClients = 3` clients each send `perClient = 2` requests on their own channel; one `server` process `alt`s across all 3 channels at once, printing whatever arrives, until it's received all 6 — a many-to-one fan-in. `v` below is bound with `:->`, not `->` — a replicated `alt` guard takes the same declare-vs-assign choice as any other receive (see the `alt` reference section), and `:->` is what lets `v` be introduced right here instead of needing a `var v int` above the loop.
 
 ```go
 package main
@@ -515,7 +516,7 @@ proc client(id int, out chan<- int) {
 proc server(chans []chan int) {
 	for range nClients * perClient {
 		alt _ := range nClients {
-			chans[_] -> v {
+			chans[_] :-> v {
 				println(v)
 			}
 		}
@@ -719,9 +720,16 @@ Runs its branches as concurrent goroutines and joins on completion — occam's `
 
 Wraps a block to indicate a `par` branch's own sequential body — sugar for a bare `{...}` block (`seq{X}` → `{X}`), provided for readability rather than semantic necessity, since Go statements already execute sequentially by default.
 
-#### `chan ->`
+#### `chan ->` and `chan :->`
 
-Receive sugar for `chan`, read left-to-right like occam's `?`: `c -> x` is `x = <-c`. Generalizes to a receive on a method/function call when the right side is call-shaped (`c -> Method(args)` → `<-c.Method(args)`, needed for `time -> After(d)`).
+Receive sugar for `chan`, read left-to-right like occam's `?`. Two forms, mirroring Go's own `=`/`:=` split for a channel receive:
+
+- `c -> x` is `x = <-c` — **assign**. `x` must already be declared. This is occam's own semantics (occam has no inline declare-on-use at all — every variable is predeclared, always).
+- `c :-> x` is `x := <-c` — **declare**. `x` is introduced fresh right here, and must *not* already be declared. A deliberate, Go-idiomatic extension with no occam equivalent.
+
+Both forms mean the same thing everywhere a receive can appear — a bare statement, an `alt` guard, or a replicated `alt` guard (see `#### alt` below) — so which one to use is a per-receive choice, not something fixed by which construct surrounds it. The one exception is `-> case` (tagged dispatch, see below), which always declares: Go's type-switch statement has no assignment form to offer.
+
+Either arrow generalizes to a receive on a method/function call when the right side is call-shaped (`c -> Method(args)` → `<-c.Method(args)`, needed for `time -> After(d)`) — there's nothing to bind in that case, so the arrow choice is irrelevant.
 
 #### `proc`
 
@@ -729,7 +737,7 @@ An alias for `func` to indicate a code unit that is intended to be run as an ind
 
 #### `alt`
 
-Waits on whichever of several channel operations becomes ready first, then runs that one branch — occam's `ALT`, rewritten to Go's `select`. Guards read left-to-right (`chan -> target { body }`, echoing occam's `chan ? x`) rather than Go's `case x := <-chan:`; a `(cond) &&` prefix gives a conditional guard, and `VAR := range EXPR {...}` gives the replicated form (one process listening across a runtime-sized set of channels, via `altN`).
+Waits on whichever of several channel operations becomes ready first, then runs that one branch — occam's `ALT`, rewritten to Go's `select`. Guards read left-to-right (`chan -> target { body }` or `chan :-> target { body }`, echoing occam's `chan ? x`) rather than Go's `case x := <-chan:`; a `(cond) &&` prefix gives a conditional guard, and `VAR := range EXPR {...}` gives the replicated form (one process listening across a runtime-sized set of channels, via `altN`). The bind target's `->`/`:->` choice (see `#### chan ->` above) is the same in every one of these shapes — plain, conditional, or replicated — including the replicated form, where only `VAR` (the winning replica index) is always fresh; that's a property of `altN`'s runtime dispatch, not of which arrow the bind target uses.
 
 #### `pri alt`
 
@@ -837,6 +845,18 @@ Five checks are done:
 ##### par timers
 
 - Any `time` channel can be used for input on mutiple par branches.
+
+[^^](#top)
+
+---
+
+<a id="ai-cheatsheet"></a>
+
+### AI Cheatsheet
+
+Bil is niche enough that most AI coding assistants have never seen it and will confidently write Go-with-buffered-channels-and-`go`-statements instead of real Bil. [`docs/ai-cheatsheet.md`](ai-cheatsheet.md) is a compact, self-contained reference — the ~10 new keywords, the 7 compiler-enforced safety rules, and 5 minimal worked patterns, framed as a delta from Go with a hint of occam, so it leverages the Go and occam knowledge every mainstream model already has.
+
+How to use it: paste the whole file as the first message of a chat (or into a persistent system/custom-instructions slot, or as an attached file) before asking for Bil code — front-loading it is what actually grounds the model. For agentic tools with shell access (Claude Code, Cursor, etc.), it's discoverable directly from the repo and pairs with `bil vet`, which gives a real, automated feedback loop the cheatsheet alone can't: it transpiles and statically checks a `.bil` file against all 7 rules without running anything, so a tool-using AI can self-correct instead of guessing.
 
 [^^](#top)
 
@@ -1595,7 +1615,7 @@ proc farmer(assign, result []chan int) {
 	}
 	for range pixels {
 		alt w := range nWorkers {
-			result[w] -> val {
+			result[w] :-> val {
 				image[assigned[w]] = val
 				if next < pixels {
 					assigned[w] = next

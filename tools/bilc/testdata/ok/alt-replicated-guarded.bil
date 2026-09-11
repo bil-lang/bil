@@ -15,7 +15,7 @@ func main() {
 		sender(b, 2)
 		seq {
 			alt j := range 3 {
-				(guards[j]) && chans[j] -> v {
+				(guards[j]) && chans[j] :-> v {
 					println(j, v)
 				}
 			}

@@ -1,0 +1,26 @@
+package main
+
+proc chooser(a <-chan int, b <-chan int, allowA bool) {
+	for range 2 {
+		alt {
+			(allowA) && a :-> v {
+				println("a", v)
+			}
+			(true) && b :-> v {
+				println("b", v)
+			}
+		}
+	}
+}
+
+func main() {
+	a := make(chan int)
+	b := make(chan int)
+	par {
+		chooser(a, b, false)
+		seq {
+			b <- 1
+			b <- 2
+		}
+	}
+}

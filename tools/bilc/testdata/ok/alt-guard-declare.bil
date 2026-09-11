@@ -1,0 +1,19 @@
+package main
+
+proc waiter(c <-chan int) {
+	alt {
+		c :-> v {
+			println(v)
+		}
+	}
+}
+
+func main() {
+	c := make(chan int)
+	par {
+		waiter(c)
+		seq {
+			c <- 7
+		}
+	}
+}

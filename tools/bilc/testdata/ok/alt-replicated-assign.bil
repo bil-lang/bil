@@ -1,0 +1,33 @@
+package main
+
+// Regression test: `->` in a replicated alt guard must assign into an
+// already-declared bind variable, not shadow it with a fresh one scoped to
+// the loop body — that shadowing bug ("declared and not used") is exactly
+// what motivated adding `:->` (see alt-replicated.bil) as the fresh-declare
+// form and reserving `->` for assignment in every context. The final
+// println below only sees the value sender wrote if `v` truly is the
+// outer, predeclared variable rather than a shadow that vanishes with the
+// loop body's scope.
+
+proc sender(b chan<- int) {
+	b <- 42
+}
+
+func main() {
+	a := make(chan int)
+	b := make(chan int)
+	c := make(chan int)
+	chans := []chan int{a, b, c}
+	var v int
+	par {
+		sender(b)
+		seq {
+			alt j := range 3 {
+				chans[j] -> v {
+					println(j, v)
+				}
+			}
+			println("after:", v)
+		}
+	}
+}

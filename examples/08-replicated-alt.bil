@@ -16,7 +16,7 @@ proc client(id int, out chan<- int) {
 proc server(chans []chan int) {
 	for range nClients * perClient {
 		alt j := range nClients {
-			chans[j] -> v {
+			chans[j] :-> v {
 				println(v)
 			}
 		}

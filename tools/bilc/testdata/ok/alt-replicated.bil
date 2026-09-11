@@ -13,7 +13,7 @@ func main() {
 		sender(b)
 		seq {
 			alt j := range 3 {
-				chans[j] -> v {
+				chans[j] :-> v {
 					println(j, v)
 				}
 			}

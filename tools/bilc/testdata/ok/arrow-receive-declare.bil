@@ -1,0 +1,22 @@
+package main
+
+proc sender(c chan<- int) {
+	c <- 42
+	c <- 99
+}
+
+proc receiver(c <-chan int) {
+	c :-> x
+	println(x)
+	c :-> y
+	println(y)
+}
+
+func main() {
+	c := make(chan int)
+
+	par {
+		sender(c)
+		receiver(c)
+	}
+}

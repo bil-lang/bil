@@ -44,7 +44,7 @@ proc farmer(assign, result []chan int) {
 	}
 	for range pixels {
 		alt w := range nWorkers {
-			result[w] -> val {
+			result[w] :-> val {
 				image[assigned[w]] = val
 				if next < pixels {
 					assigned[w] = next
