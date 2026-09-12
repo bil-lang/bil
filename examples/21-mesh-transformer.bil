@@ -1,0 +1,413 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+//
+// A minimal LLM-style transformer block, running as a real Bil program
+// on the WASM-worker grid emulator (../../emulator, a sibling repo —
+// see its README and STRATEGY.md's "Emulator architecture" note).
+// Builds directly on Example 20 (placed-controller): the same four
+// roles (controller/rowEnd/relay/idle) over row 0, and exactly the
+// same already-verified relay idiom -- but this time the values
+// hopping across the mesh's genuine cross-Worker rendezvous aren't a
+// single reflected counter, they're one whole row's worth of input
+// tokens flowing *in* to the controller, and that many predicted
+// tokens flowing back *out* -- real data traversing the physical link
+// fabric one int32 at a time, feeding a real (if tiny and untrained)
+// transformer encoder block: embedding + sinusoidal positional
+// encoding, scaled dot-product self-attention, a residual connection,
+// a feed-forward layer, a second residual, an output projection and
+// an argmax. The transformer math itself runs on one processor (the
+// controller) -- exactly like placed-controller's own "controller does
+// the real logic, everyone else relays" split -- what's new here is
+// that a genuinely useful payload (a sequence of embeddings, not a
+// scalar) is what's being relayed.
+//
+// Gather: for r = cols-1 downTo 1, whichever column *is* r sends its
+// own token west; every column strictly west of r, on hearing it
+// arrive from the east, forwards it one more hop west; everyone east
+// of r does nothing that round. That is `cols-1` fully-drained rounds,
+// each one column's token walking all the way to the controller.
+// Scatter is the mirror image once the controller has computed every
+// column's prediction: for s = 1..cols-1, the controller sends
+// prediction s east, and it walks the same relay chain forwards until
+// it reaches column s. See `runTransformer` for the actual model.
+
+package main
+
+import (
+	"math"
+	"time"
+)
+
+const generations = 2
+const vocabSize = 4
+const dModel = 4
+const dFF = 8
+
+// hopDelay is purely cosmetic -- the rendezvous itself already forces
+// correct pacing -- it just makes each hop visible on the grid.
+const hopDelay = 80 * time.Millisecond
+
+var vocab = [vocabSize]string{"the", "cat", "sat", "mat"}
+
+// embedding, wq/wk/wv, w1/b1/w2/b2 and wo are fixed, hand-picked
+// numbers -- illustrative weights for a from-scratch demo, not a
+// trained model. The point of this example is the architecture
+// (embed -> attend -> residual -> feed-forward -> residual -> project)
+// and the fact that it runs for real, distributed across the mesh's
+// own link fabric, not the quality of its predictions.
+var embedding = [vocabSize][dModel]float64{
+	{0.10, 0.20, 0.30, 0.40},
+	{0.40, 0.10, 0.20, 0.30},
+	{0.30, 0.40, 0.10, 0.20},
+	{0.20, 0.30, 0.40, 0.10},
+}
+
+var wq = [dModel][dModel]float64{
+	{1, 0, 0, 1},
+	{0, 1, 1, 0},
+	{1, 1, 0, 0},
+	{0, 0, 1, 1},
+}
+
+var wk = [dModel][dModel]float64{
+	{1, 1, 0, 0},
+	{0, 0, 1, 1},
+	{1, 0, 1, 0},
+	{0, 1, 0, 1},
+}
+
+var wv = [dModel][dModel]float64{
+	{1, 0, 1, 0},
+	{0, 1, 0, 1},
+	{1, 1, 1, 1},
+	{0, 0, 0, 1},
+}
+
+var w1 = [dModel][dFF]float64{
+	{0.2, -0.1, 0.3, 0.0, -0.2, 0.1, 0.0, 0.3},
+	{-0.1, 0.2, 0.0, 0.3, 0.1, -0.2, 0.3, 0.0},
+	{0.3, 0.0, -0.1, 0.2, 0.0, 0.3, -0.2, 0.1},
+	{0.0, 0.3, 0.2, -0.1, 0.3, 0.0, 0.1, -0.2},
+}
+var b1 = [dFF]float64{0.05, -0.05, 0.05, -0.05, 0.05, -0.05, 0.05, -0.05}
+
+var w2 = [dFF][dModel]float64{
+	{0.2, -0.1, 0.1, 0.0},
+	{-0.1, 0.2, 0.0, 0.1},
+	{0.1, 0.0, 0.2, -0.1},
+	{0.0, 0.1, -0.1, 0.2},
+	{0.2, 0.0, -0.1, 0.1},
+	{0.0, 0.2, 0.1, -0.1},
+	{-0.1, 0.1, 0.0, 0.2},
+	{0.1, -0.1, 0.2, 0.0},
+}
+var b2 = [dModel]float64{0, 0, 0, 0}
+
+var wo = [dModel][vocabSize]float64{
+	{0.5, -0.2, 0.1, 0.0},
+	{0.0, 0.5, -0.2, 0.1},
+	{0.1, 0.0, 0.5, -0.2},
+	{-0.2, 0.1, 0.0, 0.5},
+}
+
+func wordAt(tok int) string { return vocab[tok%vocabSize] }
+
+func posEncode(pos int) [dModel]float64 {
+	var pe [dModel]float64
+	for i := 0; i < dModel; i += 2 {
+		freq := 1.0 / math.Pow(10000, float64(i)/float64(dModel))
+		pe[i] = math.Sin(float64(pos) * freq)
+		if i+1 < dModel {
+			pe[i+1] = math.Cos(float64(pos) * freq)
+		}
+	}
+	return pe
+}
+
+func add4(a, b [dModel]float64) [dModel]float64 {
+	var y [dModel]float64
+	for i := 0; i < dModel; i++ {
+		y[i] = a[i] + b[i]
+	}
+	return y
+}
+
+func matVec4(w [dModel][dModel]float64, x [dModel]float64) [dModel]float64 {
+	var y [dModel]float64
+	for i := 0; i < dModel; i++ {
+		sum := 0.0
+		for j := 0; j < dModel; j++ {
+			sum += w[i][j] * x[j]
+		}
+		y[i] = sum
+	}
+	return y
+}
+
+func dot4(a, b [dModel]float64) float64 {
+	sum := 0.0
+	for i := 0; i < dModel; i++ {
+		sum += a[i] * b[i]
+	}
+	return sum
+}
+
+func softmax(scores []float64) []float64 {
+	max := scores[0]
+	for _, s := range scores {
+		if s > max {
+			max = s
+		}
+	}
+	out := make([]float64, len(scores))
+	sum := 0.0
+	for i, s := range scores {
+		out[i] = math.Exp(s - max)
+		sum += out[i]
+	}
+	for i := range out {
+		out[i] /= sum
+	}
+	return out
+}
+
+func relu(x float64) float64 {
+	if x > 0 {
+		return x
+	}
+	return 0
+}
+
+func feedForward(x [dModel]float64) [dModel]float64 {
+	var hidden [dFF]float64
+	for j := 0; j < dFF; j++ {
+		sum := b1[j]
+		for i := 0; i < dModel; i++ {
+			sum += x[i] * w1[i][j]
+		}
+		hidden[j] = relu(sum)
+	}
+	var out [dModel]float64
+	for k := 0; k < dModel; k++ {
+		sum := b2[k]
+		for j := 0; j < dFF; j++ {
+			sum += hidden[j] * w2[j][k]
+		}
+		out[k] = sum
+	}
+	return out
+}
+
+func outputLogits(x [dModel]float64) [vocabSize]float64 {
+	var logits [vocabSize]float64
+	for k := 0; k < vocabSize; k++ {
+		sum := 0.0
+		for i := 0; i < dModel; i++ {
+			sum += x[i] * wo[i][k]
+		}
+		logits[k] = sum
+	}
+	return logits
+}
+
+func argmax4(v [vocabSize]float64) int {
+	best := 0
+	for i := 1; i < vocabSize; i++ {
+		if v[i] > v[best] {
+			best = i
+		}
+	}
+	return best
+}
+
+// runTransformer runs one tiny single-block transformer encoder pass
+// -- embedding + positional encoding, self-attention over the whole
+// row, a residual connection, a feed-forward layer, a second
+// residual, an output projection and an argmax -- and returns each
+// position's predicted token. This is the only place in the program
+// that does any "ML"; everywhere else just moves tokens/predictions
+// across the mesh.
+func runTransformer(tokens []int) []int {
+	cols := len(tokens)
+
+	x0 := make([][dModel]float64, cols)
+	for c := 0; c < cols; c++ {
+		x0[c] = add4(embedding[tokens[c]%vocabSize], posEncode(c))
+	}
+
+	q := make([][dModel]float64, cols)
+	k := make([][dModel]float64, cols)
+	v := make([][dModel]float64, cols)
+	for c := 0; c < cols; c++ {
+		q[c] = matVec4(wq, x0[c])
+		k[c] = matVec4(wk, x0[c])
+		v[c] = matVec4(wv, x0[c])
+	}
+
+	predicted := make([]int, cols)
+	for c := 0; c < cols; c++ {
+		scores := make([]float64, cols)
+		for j := 0; j < cols; j++ {
+			scores[j] = dot4(q[c], k[j]) / math.Sqrt(float64(dModel))
+		}
+		weights := softmax(scores)
+
+		var attnOut [dModel]float64
+		for j := 0; j < cols; j++ {
+			for i := 0; i < dModel; i++ {
+				attnOut[i] += weights[j] * v[j][i]
+			}
+		}
+
+		resid1 := add4(x0[c], attnOut)
+		resid2 := add4(resid1, feedForward(resid1))
+		predicted[c] = argmax4(outputLogits(resid2))
+	}
+
+	return predicted
+}
+
+// controller runs at exactly one processor, (0,0): gathers every row-0
+// column's token, runs the transformer block once the whole row has
+// arrived, then scatters each column's prediction back out.
+proc controller(cols int) {
+	place eastLink at link[1]
+	bilink.Screenf("controller ready, %d cols", cols)
+
+	for gen := 0; gen < generations; gen++ {
+		tokens := make([]int, cols)
+		tokens[0] = gen % vocabSize
+
+		for r := cols - 1; r >= 1; r-- {
+			time.Sleep(hopDelay)
+			var v int32
+			eastLink -> v
+			tokens[r] = int(v)
+		}
+
+		predicted := runTransformer(tokens)
+
+		for s := 1; s < cols; s++ {
+			time.Sleep(hopDelay)
+			eastLink <- int32(predicted[s])
+		}
+
+		bilink.Screenf("gen %d: in=%q out=%q", gen, wordAt(tokens[0]), wordAt(predicted[0]))
+	}
+
+	bilink.Screenf("controller done")
+	stop
+}
+
+// rowEnd runs at (0,cols-1): the far east end of row 0. It's the
+// source for exactly one gather round (its own column) and the
+// destination for exactly one scatter round -- everything else about
+// gather/scatter happens strictly west of it, so unlike relay it
+// needs no round loop at all.
+proc rowEnd(cols int) {
+	place westLink at link[3]
+	c := cols - 1
+	bilink.Screenf("row-end ready at col %d", c)
+
+	for gen := 0; gen < generations; gen++ {
+		myTok := (c + gen) % vocabSize
+		time.Sleep(hopDelay)
+		westLink <- int32(myTok)
+
+		var predicted int32
+		westLink -> predicted
+		bilink.Screenf("gen %d: %q -> %q", gen, wordAt(myTok), wordAt(int(predicted)))
+	}
+
+	bilink.Screenf("row-end done")
+	stop
+}
+
+// relay runs on every other row-0 processor. For each gather round r:
+// if r is its own column it originates (sends its token west); if r
+// is further east it forwards (recv east, send west); otherwise that
+// round isn't on its path at all. Scatter mirrors this exactly,
+// flowing east instead of west. This is Example 20's relay idiom,
+// just run `cols-1` times per generation instead of once.
+proc relay(cols int) {
+	place westLink at link[3]
+	place eastLink at link[1]
+	c := bilink.Col()
+	bilink.Screenf("relay ready at col %d", c)
+
+	for gen := 0; gen < generations; gen++ {
+		myTok := (c + gen) % vocabSize
+
+		for r := cols - 1; r >= 1; r-- {
+			// Arrow ops (`->`/`<-`) are only recognized as a whole
+			// statement right at a statement start (see bilc's
+			// isStmtStart) — a `case ...:` label doesn't count, only
+			// the `{` that opens a block does, hence the explicit
+			// block wrapping each case body below.
+			switch {
+			case r == c:
+				{
+					time.Sleep(hopDelay)
+					westLink <- int32(myTok)
+				}
+			case r > c:
+				{
+					var v int32
+					eastLink -> v
+					time.Sleep(hopDelay)
+					westLink <- v
+				}
+			}
+		}
+
+		var predicted int32
+
+		for s := 1; s < cols; s++ {
+			switch {
+			case s == c:
+				{
+					westLink -> predicted
+				}
+			case s > c:
+				{
+					var v int32
+					westLink -> v
+					time.Sleep(hopDelay)
+					eastLink <- v
+				}
+			}
+		}
+
+		bilink.Screenf("gen %d: %q -> %q", gen, wordAt(myTok), wordAt(int(predicted)))
+	}
+
+	bilink.Screenf("relay done")
+	stop
+}
+
+// idle runs everywhere off row 0 -- this demo only uses one row.
+proc idle() {
+	bilink.Screenf("idle -- not part of row 0")
+	stop
+}
+
+func main() {
+	r, cols := bilink.Row(), bilink.NumCols()
+
+	placed par {
+		processor(0, 0) {
+			controller(cols)
+		}
+		processor(0, cols-1) {
+			rowEnd(cols)
+		}
+		default {
+			if r == 0 {
+				relay(cols)
+			} else {
+				idle()
+			}
+		}
+	}
+}
