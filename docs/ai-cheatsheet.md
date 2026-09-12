@@ -1,52 +1,75 @@
 # Bil AI Cheatsheet
 
-_Paste this file's contents alone into an AI chat prompt when asking it to write Bil — it's written to stand on its own, without the rest of the [Bil Guide](guide.md)._
+_Paste this file's contents alone into an AI chat prompt when asking it to write Bil — it's written to stand on its own. See also [`ai-cheatsheet.md`](ai-cheatsheet.md), a Go-framed variant of the same material._
 
-**Bil is Go.** Every Go rule you already know — syntax, types, structs, generics, control flow, the standard library — applies unchanged. This section is the *complete* list of what's different. If it isn't listed here, write plain Go.
+Bil's *base* language is Go — types, structs, generics, control flow, the standard library, all unchanged. But Bil's new keywords aren't invented: they're occam's own `PAR`/`SEQ`/`ALT`/`PROC`/`SKIP`/`STOP` vocabulary, kept almost verbatim (just lowercased, and `PRI ALT` kept as its own two tokens `pri alt`). If you already know occam, or CSP more generally, you already know Bil's concurrency model — map the keyword, adjust the punctuation to Go's, done. This cheatsheet pairs each new keyword, and each worked pattern, with its occam original for exactly that reason. The 7 hard rules below aren't new invented restrictions either — they're occam's own compiler-enforced variable/channel usage rules (occam 2 Reference Manual, Appendix E: a free variable written in one process can't be read in another, a channel is unidirectional between exactly two processes, and so on), which Bil's static checker (`bil vet`) re-derives and enforces on top of Go.
 
 The `.bil` file extension is used; a file starts `package main` exactly like Go.
 
 ## The only new keywords
 
-| Keyword | Meaning | Example |
+| Keyword | occam | Meaning |
 |---|---|---|
-| `par { A; B }` | Run `A` and `B` concurrently, wait for both (fork/join). | `par { sender(c); receiver(c) }` |
-| `par i := range N { X }` | Spawn `N` copies of `X`, one per index `i` (replicated parallel). | `par i := range N { worker(in[i], out[i]) }` |
-| `seq { ... }` | Marks a block as sequential. Pure readability sugar — Go already runs statements in order — used inside a `par` branch. | `seq { c <- 1; c <- 2 }` |
-| `proc` | Alias for `func`, meaning "this is a process." Checked identically to `func`. | `proc worker(in <-chan int) { ... }` |
-| `chan -> x` | **Receive, assign**, left-to-right: `c -> x` means `x = <-c`. `x` must already be declared — same rule everywhere this arrow appears (a bare statement, an `alt` guard, or a replicated `alt` guard). | `c -> x` |
-| `chan :-> x` | **Receive, declare**: `c :-> x` means `x := <-c` — `x` is introduced fresh here, and must *not* already be declared. Same rule everywhere `-> ` does (mirrors Go's own `:=` for a channel receive; `->`/`:->` is Bil's own `=`/`:=` split, not occam's — occam has no inline declare-on-use at all). | `c :-> x` |
-| `chan -> x, ok` | **Comma-ok, assign**: `c -> x, ok` means `x, ok = <-c` — Go's own two-value receive. `ok` is `false` exactly when `c` is closed and drained; both `x` and `ok` must already be declared. Either side may be `_`. | `c -> x, ok` |
-| `chan :-> x, ok` | **Comma-ok, declare**: `c :-> x, ok` means `x, ok := <-c`, both fresh. Works in every context the single-value form does — a bare statement, an `alt` guard, or a replicated `alt` guard. `close(c)` is plain Go, not a Bil keyword; this is what lets you actually observe it. | `c :-> x, ok` |
-| `chan -> Method(args)` | Receive on a call-shaped right side. | `time -> After(d)` |
-| `switch chan :-> v.(type) { ... }` | Sugar for a type-switch guard: `switch v := (<-chan).(type) { ... }`. `case Type:` clauses underneath are plain Go, nothing custom. Only `:->` applies — Go's type-switch guard has no assignment form. `chan :-> _.(type)` (don't need the value) collapses to Go's own bare `switch (<-chan).(type) { ... }`. | see pattern 4 below |
-| `alt { g1 { ... } g2 { ... } }` | Wait for whichever guard becomes ready first, then run that body (like `select`, but guards read `chan -> target { body }` / `chan :-> target { body }`, not `case x := <-chan:`). | see pattern 3 below |
-| `(cond) && chan -> x { ... }` | A conditional guard inside `alt` — only eligible when `cond` is true. `-> `/`:->` both work here, same assign/declare rule. | `(len(q)>0) && req -> _ { ... }` |
-| `alt i := range N { ... }` | Replicated `alt` — one process listening across a runtime-sized set of channels at once. The bind target follows the same `-> `/`:->` choice as any other receive — `i` (the replica index) is always fresh either way. | `alt i := range nClients { chans[i] :-> v { ... } }` |
-| `pri alt { ... }` | Same as `alt`, but branches are tried in the order written — first ready one wins, even if a later one is also ready. Plain `alt` has **no** priority (picks pseudo-randomly among ready branches). | see pattern 3 |
-| `skip` | No-op that succeeds immediately. As a block (`skip { ... }`), it's the default/non-blocking guard for an `alt`. | `skip { println("idle") }` |
-| `stop` | Deliberate, permanent halt of the current process (never returns). | `stop` |
+| `par { A; B }` | `PAR` | Run `A` and `B` concurrently, wait for both (fork/join). |
+| `par i := range N { X }` | `PAR i = 0 FOR N` | Spawn `N` copies of `X`, one per index `i` (replicated parallel). |
+| `seq { ... }` | `SEQ` | Marks a block as sequential. Pure readability sugar in Bil (Go already runs statements in order); in occam `SEQ` is load-bearing since `PAR` is the default otherwise implied. |
+| `proc` | `PROC` | Declares a named process. Alias for `func`, checked identically. |
+| `chan -> x` | `chan ? x` | **Receive, assign**, left-to-right just like occam: `c -> x` means `x = <-c`. `x` must already be declared, exactly as occam requires — and this is true everywhere `->` appears: a bare statement, an `alt` guard, or a replicated `alt` guard. |
+| `chan :-> x` | _(no occam equivalent)_ | **Receive, declare**: `c :-> x` means `x := <-c` — `x` is introduced fresh here, and must *not* already be declared. A deliberate Go-idiomatic extension beyond occam (which has no inline declare-on-use at all, ever) — mirrors Go's own `:=` for a channel receive (`x := <-c`, `case v := <-ch:`). Same rule everywhere `->` does: pick `->` or `:->` per receive, independent of which construct surrounds it. |
+| `chan -> x, ok` | _(no occam equivalent)_ | **Comma-ok, assign**: `c -> x, ok` means `x, ok = <-c` — Go's own two-value receive, with no occam analog (occam channels have no "closed" state to detect). `ok` is `false` exactly when `c` is closed and drained; `x`/`ok` must already be declared. Either side may be `_`. |
+| `chan :-> x, ok` | _(no occam equivalent)_ | **Comma-ok, declare**: `c :-> x, ok` means `x, ok := <-c`, both fresh. Works in every context the single-value form does — bare statement, `alt` guard, replicated `alt` guard. `close(c)` is plain Go, not a Bil keyword; this is what lets you actually observe it. |
+| `chan -> Method(args)` | _(no occam equivalent)_ | Receive on a call-shaped right side — a Go-interop escape hatch, needed for things like `time -> After(d)` that have no occam analog. |
+| `switch chan :-> v.(type) { ... }` | _(no occam equivalent)_ | Sugar for Go's own type-switch guard: `switch v := (<-chan).(type) { ... }`. `case Type:` clauses underneath are plain Go — no custom clause syntax at all. Only `:->` applies here (never `->`): Go's type-switch guard grammar has no assignment form to offer. `chan :-> _.(type)` (don't need the value) collapses to Go's own bare `switch (<-chan).(type) { ... }`. |
+| `alt { g1 { ... } g2 { ... } }` | `ALT` | Wait for whichever guard becomes ready first, then run that body. Guards read left-to-right (`chan -> target { body }` or `chan :-> target { body }`), echoing occam's `chan ? x`. |
+| `(cond) && chan -> x { ... }` | `(cond) & chan ? x` | A conditional guard inside `alt` — only eligible when `cond` is true. (`&&` matches Go's own logical-and token, not occam's bare `&`.) `->`/`:->` both work here, same assign/declare rule. |
+| `alt i := range N { ... }` | `ALT i = 0 FOR N` | Replicated `alt` — one process listening across a runtime-sized set of channels at once. The bind target takes the same `->`/`:->` choice as any other receive; `i` (the replica index) is fresh either way, since it's the construct's own runtime dispatch result, not something occam's static replicator has an equivalent of. |
+| `pri alt { ... }` | `PRI ALT` | Same as `alt`, but branches are tried in priority order — the first ready one wins, even if a lower-priority one is also ready. |
+| `skip` | `SKIP` | No-op that succeeds immediately. As a block (`skip { ... }`), it's also the default/non-blocking guard for an `alt` — same role occam's bare `SKIP` guard plays. |
+| `stop` | `STOP` | Deliberate, permanent halt of the current process (never returns). |
 
-Helper generics (already provided, just call them — don't redefine): `makeChans[T](n)` makes `n` channels of type `T`; `splitN(slice, n)` splits a slice into `n` disjoint chunks for handing to replicated workers; `splitN2D(matrix, nr, nc)` does the 2D version.
+Helper generics (already provided, just call them — don't redefine): `makeChans[T](n)` makes `n` channels of type `T`, the equivalent of declaring `[n]CHAN OF T`; `splitN(slice, n)` splits a slice into `n` disjoint chunks for handing to replicated workers; `splitN2D(matrix, nr, nc)` does the 2D version. None of these three have a direct occam keyword — occam programs did the equivalent by hand, per-example.
 
 ## Hard rules — violating any of these is a compile-time error, not a style nit
 
-1. **Channels are always unbuffered.** Never write `make(chan T, N)` with `N > 0` — always `make(chan T)`.
-2. **There is no `go` keyword.** All concurrency goes through `par` / `par range`. Never write `go f()`.
-3. A given `chan` may be written (`<-`) in exactly **one** branch of a `par` and read (`->`) in exactly **one other** branch.
-4. A variable captured from an outer scope that's *written* in one `par` branch cannot be *read* in another branch.
-5. A pointer, map, or interface value touched (read OR write) by more than one branch of the same `par` is rejected outright — even read-only sharing of these three types across branches is disallowed. (Plain value types, e.g. `int`/`struct` by value, are fine to read in multiple branches as long as none of them write it — rule 4.)
-6. Slice/array elements may be written from more than one `par` branch only when each branch's index range is *provably disjoint* from the others — use `splitN`/`splitN2D` to get disjoint chunks rather than hand-slicing.
-7. Exception to rule 3/5: a `time` channel (e.g. from `time.After`) may be read from multiple `par` branches.
+1. **Channels are always unbuffered.** Never write `make(chan T, N)` with `N > 0` — always `make(chan T)`. Matches occam's `CHAN OF T`, which has no buffering concept at all.
+2. **There is no `go` keyword.** All concurrency goes through `par` / `par range` — occam has no equivalent of a dynamically-spawned goroutine either, only `PAR`.
+3. A given `chan` may be written (`<-`) in exactly **one** branch of a `par` and read (`->`) in exactly **one other** branch — occam's channel usage rule.
+4. A variable captured from an outer scope that's *written* in one `par` branch cannot be *read* in another branch — occam's free-variable usage rule.
+5. A pointer, map, or interface value touched (read OR write) by more than one branch of the same `par` is rejected outright — even read-only sharing of these three types across branches is disallowed. (Plain value types, e.g. `int`/`struct` by value, are fine to read in multiple branches as long as none of them write it — rule 4. occam has no pointers/maps/interfaces at all, so this rule is Bil's own extension of the same underlying principle to Go's reference types.)
+6. Slice/array elements may be written from more than one `par` branch only when each branch's index range is *provably disjoint* from the others — use `splitN`/`splitN2D` to get disjoint chunks rather than hand-slicing. occam's array usage rule, same idea.
+7. Exception to rule 3/5: a `time` channel (e.g. from `time.After`) may be read from multiple `par` branches — a Bil-specific carve-out, since occam has no `time` package to reason about.
 
-## Canonical patterns
+## Canonical patterns (agents know occam, so we map to Bil)
 
 **1. Two processes, one channel**
+
+occam:
+```occam
+CHAN OF INT c:
+
+PAR
+  SEQ
+    c ! 42
+    c ! 99
+
+  SEQ
+    INT x:
+    INT y:
+
+    c ? x
+    c ? y
+
+    out.int(x, 0)
+    out.int(y, 0)
+```
+
+Bil:
 ```go
 package main
 
 func main() {
 	c := make(chan int)
+
 	par {
 		seq {
 			c <- 42
@@ -64,10 +87,40 @@ func main() {
 ```
 
 **2. Worker farm (replicated parallel)**
+
+occam:
+```occam
+VAL INT N IS 3:
+
+PROC worker(CHAN OF INT in, CHAN OF INT out)
+  INT x:
+  SEQ
+    in ? x
+    out ! (x * x)
+:
+
+[N]CHAN OF INT toWorker:
+[N]CHAN OF INT fmWorker:
+INT r:
+
+PAR
+  PAR i = 0 FOR N
+    worker(toWorker[i], fmWorker[i])
+
+  SEQ
+    SEQ i = 0 FOR N
+      toWorker[i] ! (i + 1)
+    SEQ i = 0 FOR N
+      SEQ
+        fmWorker[i] ? r
+        out.int(r, 0)
+```
+
+Bil:
 ```go
 package main
 
-const n = 3
+const N = 3
 
 proc worker(in <-chan int, out chan<- int) {
 	var x int
@@ -76,18 +129,18 @@ proc worker(in <-chan int, out chan<- int) {
 }
 
 func main() {
-	toWorker := makeChans[int](n)
-	fmWorker := makeChans[int](n)
+	toWorker := makeChans[int](N)
+	fmWorker := makeChans[int](N)
 
 	par {
-		par i := range n {
+		par i := range N {
 			worker(toWorker[i], fmWorker[i])
 		}
 		seq {
-			for i := range n {
+			for i := range N {
 				toWorker[i] <- i + 1
 			}
-			for i := range n {
+			for i := range N {
 				println(<-fmWorker[i])
 			}
 		}
@@ -95,49 +148,191 @@ func main() {
 }
 ```
 
-**3. `alt` with a `skip` default (non-blocking poll)**
+**3. `alt` with a `skip` default, plus `stop` (non-blocking poll)**
+
+occam:
+```occam
+PROC poller(CHAN OF INT c)
+  INT x:
+  SEQ
+    ALT
+      c ? x
+        IF
+          x >= 0
+            out.int(x, 0)
+          TRUE
+            STOP
+
+      SKIP
+        SKIP
+:
+```
+
+Bil:
 ```go
 package main
 
+import "time"
+
 proc poller(c <-chan int) {
 	var x int
-	alt {
-		c -> x {
-			println(x)
+	for {
+		alt {
+			c -> x {
+				if x >= 0 {
+					println(x)
+				} else {
+					stop
+				}
+			}
+			skip {
+				println("skip")
+			}
 		}
-		skip {
-			println("nothing ready")
-		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+proc sender(c chan<- int) {
+	time.Sleep(150 * time.Millisecond)
+	c <- 42
+	time.Sleep(150 * time.Millisecond)
+	c <- -1
+}
+
+func main() {
+	c := make(chan int)
+
+	par {
+		poller(c)
+		sender(c)
 	}
 }
 ```
 
 **4. Tagged/variant channel protocol**
+
+occam's variant protocol (`PROTOCOL ... CASE`) has no dedicated Bil clause syntax — the `case Type:` clauses are plain Go, exactly the same "dispatch by tag" idiom Go already has. The one piece of sugar Bil does add is `:->` on the `switch` guard line itself (`switch chan :-> v.(type) { ... }`), reading left-to-right like every other Bil receive; writing the plain Go guard directly (`switch v := (<-chan).(type) { ... }`) works exactly the same.
+
+occam:
+```occam
+PROTOCOL LOGMSG
+  CASE
+    info; INT
+    warn; INT
+:
+
+PROC logSender(CHAN OF LOGMSG out)
+  SEQ
+    out ! info; 1
+    out ! warn; 2
+    out ! info; 3
+:
+
+PROC logReceiver(CHAN OF LOGMSG in)
+  INT code:
+  SEQ i = 0 FOR 3
+    in ? CASE
+      info; code
+        out.string("info*n", 0)
+      warn; code
+        out.string("warn*n", 0)
+:
+```
+
+Bil:
 ```go
 package main
 
-type Msg interface{ isMsg() }
-type Info struct{ Code int }
-type Warn struct{ Code int }
+type LogMsg interface {
+	isLogMsg()
+}
 
-func (Info) isMsg() {}
-func (Warn) isMsg() {}
+type Info struct {
+	Code int
+}
 
-proc logReceiver(in <-chan Msg) {
-	switch in :-> v.(type) {
-	case Info:
-		println("info", v.Code)
-	case Warn:
-		println("warn", v.Code)
+func (Info) isLogMsg() {}
+
+type Warn struct {
+	Code int
+}
+
+func (Warn) isLogMsg() {}
+
+proc logSender(out chan<- LogMsg) {
+	out <- Info{Code: 1}
+	out <- Warn{Code: 2}
+	out <- Info{Code: 3}
+}
+
+proc logReceiver(in <-chan LogMsg) {
+	for range 3 {
+		switch in :-> v.(type) {
+		case Info:
+			println("info", v.Code)
+		case Warn:
+			println("warn", v.Code)
+		}
+	}
+}
+
+func main() {
+	logs := make(chan LogMsg)
+	par {
+		logSender(logs)
+		logReceiver(logs)
 	}
 }
 ```
 
 **5. Pipeline (chain of processes)**
+
+occam:
+```occam
+VAL INT N IS 10:
+VAL INT LIMIT IS 30:
+
+PROC generator(CHAN OF INT out)
+  INT v:
+  SEQ
+    v := 2
+    WHILE v <= LIMIT
+      SEQ
+        out ! v
+        v := v + 1
+    STOP
+:
+
+PROC filter(CHAN OF INT in, CHAN OF INT out)
+  INT prime:
+  INT v:
+  SEQ
+    in ? prime
+    out.int(prime, 0)
+    WHILE TRUE
+      SEQ
+        in ? v
+        IF
+          (v REM prime) <> 0
+            out ! v
+          TRUE
+            SKIP
+:
+
+[N + 1]CHAN OF INT c:
+
+PAR
+  generator(c[0])
+  PAR i = 0 FOR N
+    filter(c[i], c[i + 1])
+```
+
+Bil:
 ```go
 package main
 
-const n = 10
+const N = 10
 const limit = 30
 
 proc generator(out chan<- int) {
@@ -149,21 +344,24 @@ proc generator(out chan<- int) {
 
 proc filter(in <-chan int, out chan<- int) {
 	var prime, v int
-	in -> prime
-	println(prime)
-	for {
-		in -> v
-		if v%prime != 0 {
-			out <- v
+	seq {
+		in -> prime
+		println(prime)
+		for {
+			in -> v
+			if v%prime != 0 {
+				out <- v
+			}
 		}
 	}
 }
 
 func main() {
-	c := makeChans[int](n + 1)
+	c := makeChans[int](N + 1)
+
 	par {
 		generator(c[0])
-		par i := range n {
+		par i := range N {
 			filter(c[i], c[i+1])
 		}
 	}
