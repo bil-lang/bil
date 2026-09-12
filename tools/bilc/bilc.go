@@ -10,6 +10,7 @@ import (
 	"go/scanner"
 	"go/token"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -236,6 +237,7 @@ type transformer struct {
 // by matchLinkReceive/matchLinkSend and the link-rejection guards via
 // resolvePlaceAlias.
 type placeAliasScope struct {
+	procName       string // the enclosing proc/func's name -- used by PlacementManifest to group aliases
 	bodyLo, bodyHi int
 	aliases        map[string]string
 }
@@ -1074,8 +1076,15 @@ func (t *transformer) matchArrowReceive(lo, hi int) (rhsLo, rhsHi, lhsEnd int, k
 	return rhsLo, rhsHi, lhsEnd, kind, okSrc, hasOk, matchEnd, isCall, true
 }
 
+// funcBodyRange is one named top-level `proc`/`func` declaration's name
+// and body token range, as found by collectFuncBodyRanges.
+type funcBodyRange struct {
+	name           string
+	bodyLo, bodyHi int
+}
+
 // collectFuncBodyRanges finds every named top-level `proc`/`func`
-// declaration's body token range. Go doesn't allow nested named
+// declaration's name and body token range. Go doesn't allow nested named
 // declarations, so a flat scan has no overlap to worry about — unlike
 // isReplicatedPar/isReplicatedAlt and friends, this doesn't need to be
 // invoked from a specific position; it just walks the whole file once.
@@ -1084,7 +1093,7 @@ func (t *transformer) matchArrowReceive(lo, hi int) (rhsLo, rhsHi, lhsEnd int, k
 // checkProcChanBothDirections already takes for the same reason) — place
 // aliases simply aren't resolvable inside one, matching that check's own
 // limitation rather than inventing a new one.
-func (t *transformer) collectFuncBodyRanges() (ranges [][2]int) {
+func (t *transformer) collectFuncBodyRanges() (ranges []funcBodyRange) {
 	toks := t.toks
 	for i := 0; i+2 < len(toks); i++ {
 		isProc := toks[i].tok == token.IDENT && toks[i].lit == "proc"
@@ -1100,7 +1109,7 @@ func (t *transformer) collectFuncBodyRanges() (ranges [][2]int) {
 		}
 		bodyOpen := parenClose + 1
 		bodyClose := matchBrace(toks, bodyOpen)
-		ranges = append(ranges, [2]int{bodyOpen + 1, bodyClose})
+		ranges = append(ranges, funcBodyRange{name: toks[i+1].lit, bodyLo: bodyOpen + 1, bodyHi: bodyClose})
 	}
 	return ranges
 }
@@ -1122,7 +1131,7 @@ func (t *transformer) collectFuncBodyRanges() (ranges [][2]int) {
 // needs whole-file information instead (collision with a proc/func name).
 func (t *transformer) collectPlaceAliases() error {
 	for _, br := range t.collectFuncBodyRanges() {
-		lo, hi := br[0], br[1]
+		lo, hi := br.bodyLo, br.bodyHi
 		var aliases map[string]string
 		for i := lo; i < hi; i++ {
 			if !(t.toks[i].tok == token.IDENT && t.toks[i].lit == "place" &&
@@ -1148,7 +1157,7 @@ func (t *transformer) collectPlaceAliases() error {
 			aliases[name] = idxExpr
 		}
 		if aliases != nil {
-			t.placeAliases = append(t.placeAliases, placeAliasScope{bodyLo: lo, bodyHi: hi, aliases: aliases})
+			t.placeAliases = append(t.placeAliases, placeAliasScope{procName: br.name, bodyLo: lo, bodyHi: hi, aliases: aliases})
 		}
 	}
 	return nil
@@ -2180,6 +2189,169 @@ func (t *transformer) checkNoBufferedChannels() error {
 		}
 	}
 	return nil
+}
+
+// singleCallText reports whether the body [lo,hi) reduces to exactly one
+// bare call statement (`name(...)`, no other statements before or after,
+// modulo semicolons) — and if so, returns the called function's name.
+// Used only by PlacementManifest, to decide whether a placement clause's
+// body can be summarized as "this proc runs here"; a clause whose body
+// does anything else (an if/else, several statements, ...) is recorded in
+// the manifest as structurally present but left unresolved — see
+// PlacementManifest's own doc comment for why that's the honest answer
+// rather than a bug to fix.
+func (t *transformer) singleCallText(lo, hi int) (name string, ok bool) {
+	i := lo
+	for i < hi && t.toks[i].tok == token.SEMICOLON {
+		i++
+	}
+	if i >= hi || t.toks[i].tok != token.IDENT {
+		return "", false
+	}
+	nameTok := i
+	if i+1 >= hi || t.toks[i+1].tok != token.LPAREN {
+		return "", false
+	}
+	close := matchParen(t.toks, i+1)
+	j := close + 1
+	for j < hi && t.toks[j].tok == token.SEMICOLON {
+		j++
+	}
+	if j != hi {
+		return "", false // more than the one statement
+	}
+	return t.toks[nameTok].lit, true
+}
+
+// yamlScalar renders expr — an arbitrary Go expression's source text, not
+// a YAML-native value — as a single YAML flow scalar: unquoted only when
+// it's a plain integer literal (so `id: 0` reads cleanly), double-quoted
+// otherwise (`col: "cols-1"`), since almost everything placement deals in
+// (`cols-1`, `north`, a role name) is source text YAML would otherwise
+// try, and fail, to parse as one of its own types.
+func yamlScalar(expr string) string {
+	isInt := len(expr) > 0
+	for i, r := range expr {
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		if i == 0 && r == '-' {
+			continue
+		}
+		isInt = false
+		break
+	}
+	if isInt {
+		return expr
+	}
+	return `"` + strings.ReplaceAll(expr, `"`, `\"`) + `"`
+}
+
+// PlacementManifest builds the topology manifest for a `placed par`-using
+// .bil source file — a small, deliberately incomplete YAML description of
+// a program's declared placement structure (which processor(s) run which
+// proc, and each proc's link aliases), pulled forward from the much
+// bigger, unstarted "layout tooling" subproject (processor -> host,
+// channel -> link) because it falls out of bilc's own parsing almost for
+// free: matchPlacedPar/parsePlacedParClauses and collectPlaceAliases
+// already fully parse this structure to emit the runtime `switch`, so
+// serializing it costs little more. Returns (nil, nil) for a file with no
+// `placed par` block at all — most .bil files — so callers can treat a
+// nil result as "nothing to write" without a separate has-any check of
+// their own. Deliberately not a build-time image splitter, host mapper,
+// or bootstrap protocol — those need real design work this file doesn't
+// attempt.
+//
+// The manifest can only ever describe *structure*, never fully-resolved
+// concrete positions: `processor(0, cols-1)` depends on `cols`, a value
+// chosen when a program is launched, which bilc never knows at transform
+// time. It also can't always name a single proc for a clause — the
+// canonical worked example's `default` branch has an if/else inside it,
+// so that clause is recorded with no `proc:` line rather than a guess
+// (see singleCallText). This is intentional, honest incompleteness, not
+// a bug: resolving it further would mean fixing grid dimensions at
+// bilc-compile time, which is exactly the heterogeneous-multi-image
+// build model this design deliberately isn't taking on.
+//
+// Only the first `placed par` block in a file is described — v1 only
+// ever has one in practice, since the construct is a standalone
+// statement (not nestable), so a file with more than one is unusual
+// enough not to need the manifest format to anticipate it yet.
+func PlacementManifest(filename string, src []byte) ([]byte, error) {
+	if abs, err := filepath.Abs(filename); err == nil {
+		filename = abs
+	}
+	t := tokenize(filename, src)
+	if err := t.collectPlaceAliases(); err != nil {
+		return nil, err
+	}
+	var clauses []placedClause
+	for i := 0; i+2 < len(t.toks); i++ {
+		if !(t.toks[i].tok == token.IDENT && t.toks[i].lit == "placed" &&
+			t.toks[i+1].tok == token.IDENT && t.toks[i+1].lit == "par" &&
+			t.toks[i+2].tok == token.LBRACE) {
+			continue
+		}
+		close := matchBrace(t.toks, i+2)
+		var ok bool
+		clauses, ok = t.parsePlacedParClauses(i+3, close)
+		if !ok {
+			clauses = nil
+		}
+		break
+	}
+	if len(clauses) == 0 {
+		return nil, nil
+	}
+
+	var out bytes.Buffer
+	out.WriteString("placements:\n")
+	var defaultClause *placedClause
+	for i := range clauses {
+		cl := &clauses[i]
+		if cl.isDefault {
+			defaultClause = cl
+			continue
+		}
+		out.WriteString("  - match: {")
+		if cl.idExpr != "" {
+			fmt.Fprintf(&out, "id: %s", yamlScalar(cl.idExpr))
+		} else {
+			fmt.Fprintf(&out, "row: %s, col: %s", yamlScalar(cl.rowExpr), yamlScalar(cl.colExpr))
+		}
+		out.WriteString("}\n")
+		if proc, ok := t.singleCallText(cl.bodyLo, cl.bodyHi); ok {
+			fmt.Fprintf(&out, "    proc: %s\n", proc)
+		}
+	}
+	if defaultClause != nil {
+		out.WriteString("default:\n")
+		if proc, ok := t.singleCallText(defaultClause.bodyLo, defaultClause.bodyHi); ok {
+			fmt.Fprintf(&out, "  proc: %s\n", proc)
+		}
+	}
+
+	if len(t.placeAliases) > 0 {
+		scopes := append([]placeAliasScope(nil), t.placeAliases...)
+		sort.Slice(scopes, func(i, j int) bool { return scopes[i].procName < scopes[j].procName })
+		out.WriteString("links:\n  aliases:\n")
+		for _, scope := range scopes {
+			names := make([]string, 0, len(scope.aliases))
+			for name := range scope.aliases {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			fmt.Fprintf(&out, "    %s: {", scope.procName)
+			for i, name := range names {
+				if i > 0 {
+					out.WriteString(", ")
+				}
+				fmt.Fprintf(&out, "%s: %s", name, yamlScalar(scope.aliases[name]))
+			}
+			out.WriteString("}\n")
+		}
+	}
+	return out.Bytes(), nil
 }
 
 func Transform(filename string, src []byte) ([]byte, error) {

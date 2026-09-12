@@ -443,6 +443,85 @@ func main() {
 	}
 }
 
+// TestPlacementManifest exercises the topology manifest against a fixture
+// using both `processor` arities plus a `default` (with an if/else body,
+// so it's recorded with no `proc:` line — see PlacementManifest's own
+// doc comment for why that's correct, not a gap) and two `place` aliases,
+// and confirms an ordinary (non-`placed par`) file gets no manifest at
+// all rather than an empty one.
+func TestPlacementManifest(t *testing.T) {
+	src := []byte(`package main
+
+proc controller(cols int) {
+	place toEast at link[1]
+	var v int32
+	toEast -> v
+}
+
+proc rowEnd() {
+	place toWest at link[3]
+	var v int32
+	toWest -> v
+}
+
+func main() {
+	r, cols := 0, 4
+	placed par {
+		processor(0, 0) {
+			controller(cols)
+		}
+		processor(0, cols-1) {
+			rowEnd()
+		}
+		default {
+			if r == 0 {
+				println("relay")
+			} else {
+				println("idle")
+			}
+		}
+	}
+}
+`)
+	m, err := PlacementManifest("test.bil", src)
+	if err != nil {
+		t.Fatalf("PlacementManifest: %v", err)
+	}
+	got := string(m)
+	for _, want := range []string{
+		"match: {row: 0, col: 0}",
+		"proc: controller",
+		`match: {row: 0, col: "cols-1"}`,
+		"proc: rowEnd",
+		"default:",
+		"toEast: 1",
+		"toWest: 3",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in manifest, got:\n%s", want, got)
+		}
+	}
+	// default's body is an if/else, not a single call -- it must not be
+	// credited with a resolved proc name it doesn't actually have.
+	if strings.Contains(got, "proc: println") {
+		t.Errorf("expected default's unresolved if/else body to have no proc: line, got:\n%s", got)
+	}
+
+	noPlacement := []byte(`package main
+
+func main() {
+	println("hello")
+}
+`)
+	m2, err := PlacementManifest("test.bil", noPlacement)
+	if err != nil {
+		t.Fatalf("PlacementManifest (no placed par): %v", err)
+	}
+	if m2 != nil {
+		t.Errorf("expected nil manifest for a file with no placed par block, got:\n%s", m2)
+	}
+}
+
 // TestLineDirectives checks that Transform's `//line` directives (see
 // resync in bilc.go) correctly map error positions in the transpiled Go
 // back to the original .bil file and line — the mechanism tools/vet and
