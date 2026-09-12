@@ -1,0 +1,115 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+//
+// A heterogeneous placement demo on the WASM-worker grid emulator
+// (../../emulator, a sibling repo — see its README and
+// STRATEGY.md's "Emulator architecture" note), building on Example 19
+// (mesh-ripple): that example runs the *same* proc on every node,
+// branching internally on its own position. `placed par` instead lets
+// this program give genuinely different, separately-named roles to
+// specific processors — `controller` at (0,0), `rowEnd` at
+// (0,cols-1), `relay` for the rest of row 0, `idle` everywhere else —
+// each its own proc, reasoned about on its own, with the placement
+// itself as the only new machinery: the send/receive pattern is
+// exactly Example 19's already-verified one.
+//
+// `place NAME at link[EXPR]` gives each role's own link a short local
+// name — `toEast`, `toWest`, `fromWest` — so a proc's body reads as
+// "receive from my west neighbour", not "receive from link[3]", with
+// the mapping declared once, right where the proc uses it, rather than
+// carried in your head the way Example 19's raw `link[west]` needs to
+// be. Purely a naming convenience: `place` emits no Go at all, and
+// `toEast -> v` compiles to exactly the same `bilink.Recv` call
+// `link[east] -> v` would.
+
+package main
+
+import "time"
+
+const (
+	north = 0
+	east  = 1
+	south = 2
+	west  = 3
+)
+
+const rounds = 3
+const hopDelay = 150 * time.Millisecond
+
+// controller runs at exactly one processor, (0,0): originates each
+// round's value east, then waits for it to come back reflected.
+proc controller(cols int) {
+	place toEast at link[east]
+	bilink.Screenf("controller ready, %d cols", cols)
+	for round := 0; round < rounds; round++ {
+		time.Sleep(hopDelay)
+		toEast <- int32(round)
+		var v int32
+		toEast -> v
+		bilink.Screenf("round %d: reflected %d", round, v)
+	}
+	bilink.Screenf("controller done")
+	stop
+}
+
+// rowEnd runs at (0,cols-1): the far end of row 0, reflecting whatever
+// arrives from the west straight back.
+proc rowEnd() {
+	place toWest at link[west]
+	bilink.Screenf("row-end ready")
+	for round := 0; round < rounds; round++ {
+		var v int32
+		toWest -> v
+		bilink.Screenf("round %d: got %d, reflecting", round, v)
+		time.Sleep(hopDelay)
+		toWest <- v
+	}
+	bilink.Screenf("row-end done")
+	stop
+}
+
+// relay runs on every other row-0 processor: forward east, forward
+// the reflection back west.
+proc relay() {
+	place fromWest at link[west]
+	place toEast at link[east]
+	bilink.Screenf("relay ready")
+	for round := 0; round < rounds; round++ {
+		var v int32
+		fromWest -> v
+		toEast <- v
+		var v2 int32
+		toEast -> v2
+		fromWest <- v2
+	}
+	bilink.Screenf("relay done")
+	stop
+}
+
+// idle runs everywhere off row 0 — nothing to do in this demo, just
+// confirming placement dispatched here correctly at all.
+proc idle() {
+	bilink.Screenf("idle -- not part of row 0")
+	stop
+}
+
+func main() {
+	r, cols := bilink.Row(), bilink.NumCols()
+
+	placed par {
+		processor(0, 0) {
+			controller(cols)
+		}
+		processor(0, cols-1) {
+			rowEnd()
+		}
+		default {
+			if r == 0 {
+				relay()
+			} else {
+				idle()
+			}
+		}
+	}
+}
