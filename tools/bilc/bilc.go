@@ -213,13 +213,31 @@ func altN[T any](chans []chan T, guards ...bool) (int, T, bool) {
 `
 
 type transformer struct {
-	file         *token.File
-	src          []byte
-	toks         []tok
-	usedStop     bool // set when a `stop` statement is rewritten
-	usedAltN     bool // set when the source calls `altN`
-	usedSplitN2D bool // set when the source calls `splitN2D`
-	usedLink     bool // set when a `link[...]` send or receive is rewritten
+	file          *token.File
+	src           []byte
+	toks          []tok
+	usedStop      bool // set when a `stop` statement is rewritten
+	usedAltN      bool // set when the source calls `altN`
+	usedSplitN2D  bool // set when the source calls `splitN2D`
+	usedLink      bool // set when a `link[...]` send or receive is rewritten
+	usedPlacement bool // set when a `placed par` block is rewritten
+
+	// placeAliases holds every `place NAME at link[EXPR]` declaration's
+	// scope, collected by collectPlaceAliases before transform() runs.
+	// Scoped per enclosing proc/func body, not file-global -- placement
+	// makes multiple distinct, differently-roled procs normal in one
+	// file, and a file-global alias table would force artificial
+	// cross-proc name uniqueness.
+	placeAliases []placeAliasScope
+}
+
+// placeAliasScope is one proc/func body's `place`-alias table: NAME ->
+// the link index expression's source text (e.g. "east", "3"), resolved
+// by matchLinkReceive/matchLinkSend and the link-rejection guards via
+// resolvePlaceAlias.
+type placeAliasScope struct {
+	bodyLo, bodyHi int
+	aliases        map[string]string
 }
 
 func tokenize(filename string, src []byte) *transformer {
@@ -794,13 +812,14 @@ func (t *transformer) parseAltGuard(lo, hi int) (g altGuard, ok bool) {
 	if lo >= hi {
 		return altGuard{}, false
 	}
-	if t.toks[lo].tok == token.IDENT && t.toks[lo].lit == "link" {
+	if t.toks[lo].tok == token.IDENT && (t.toks[lo].lit == "link" || t.isPlaceAlias(lo)) {
 		// `link[idx]` isn't a real Go channel (see matchLinkReceive) — the
 		// unconditional-guard path below would otherwise match it structurally
 		// (parsePrimaryExpr handles `base[idx]` generically) and silently emit
 		// a broken `case v = <-link[idx]:`. Rejecting here surfaces the normal
 		// "unsupported alt-guard shape" panic instead — alt/pri alt over links
-		// isn't supported yet (see ../../emulator/README.md).
+		// isn't supported yet (see ../../emulator/README.md), including over a
+		// place-aliased link, same as a literal `link[...]`.
 		return altGuard{}, false
 	}
 	if t.toks[lo].tok == token.LPAREN {
@@ -823,7 +842,7 @@ func (t *transformer) parseAltGuard(lo, hi int) (g altGuard, ok bool) {
 		}
 		condSrc := string(t.src[t.off(t.toks[lo].pos) : t.off(t.toks[condClose].pos)+1])
 		gLo := condClose + 2
-		if gLo < hi && t.toks[gLo].tok == token.IDENT && t.toks[gLo].lit == "link" {
+		if gLo < hi && t.toks[gLo].tok == token.IDENT && (t.toks[gLo].lit == "link" || t.isPlaceAlias(gLo)) {
 			return altGuard{}, false // see the unconditional-guard check above
 		}
 		lhsEnd, ok1 := t.parsePrimaryExpr(gLo, hi)
@@ -1055,69 +1074,264 @@ func (t *transformer) matchArrowReceive(lo, hi int) (rhsLo, rhsHi, lhsEnd int, k
 	return rhsLo, rhsHi, lhsEnd, kind, okSrc, hasOk, matchEnd, isCall, true
 }
 
-// matchLinkReceive recognizes `link[idx] -> var` as a whole statement —
-// `link` is Bil's reserved, index-addressed array of nearest-neighbour
-// links (an emulator concept: see ../../emulator/README.md and its
-// nodeprog/bilink package), not a real Go channel — the physical link
-// crosses a WASM-instance/Worker boundary, which no in-process Go
-// channel can express. `link[idx]` already parses as an ordinary
-// primary expression (parsePrimaryExpr handles `base[idx]` generically),
-// so matchArrowReceive already matches it structurally; this just
-// narrows that match to exactly `link[idx]` (rejecting a call-shaped
-// target or any chaining past the single index, like `link[idx].field`)
-// and reports the index and bind-variable source separately, so the
-// caller can emit `var = bilink.Recv(idx)` instead of a plain `<-`. Only
-// the assign arrow (`->`) with no comma-ok suffix is supported for now —
-// `link[idx] :-> var` (declare) and `link[idx] -> var, ok` (comma-ok)
-// aren't part of this construct yet.
+// collectFuncBodyRanges finds every named top-level `proc`/`func`
+// declaration's body token range. Go doesn't allow nested named
+// declarations, so a flat scan has no overlap to worry about — unlike
+// isReplicatedPar/isReplicatedAlt and friends, this doesn't need to be
+// invoked from a specific position; it just walks the whole file once.
+// Skips a declaration with a return type between its parameter list and
+// body (the same "not a shape we recognize" stance
+// checkProcChanBothDirections already takes for the same reason) — place
+// aliases simply aren't resolvable inside one, matching that check's own
+// limitation rather than inventing a new one.
+func (t *transformer) collectFuncBodyRanges() (ranges [][2]int) {
+	toks := t.toks
+	for i := 0; i+2 < len(toks); i++ {
+		isProc := toks[i].tok == token.IDENT && toks[i].lit == "proc"
+		if !isProc && toks[i].tok != token.FUNC {
+			continue
+		}
+		if toks[i+1].tok != token.IDENT || toks[i+2].tok != token.LPAREN {
+			continue
+		}
+		parenClose := matchParen(toks, i+2)
+		if parenClose+1 >= len(toks) || toks[parenClose+1].tok != token.LBRACE {
+			continue
+		}
+		bodyOpen := parenClose + 1
+		bodyClose := matchBrace(toks, bodyOpen)
+		ranges = append(ranges, [2]int{bodyOpen + 1, bodyClose})
+	}
+	return ranges
+}
+
+// collectPlaceAliases scans every proc/func body range (collectFuncBodyRanges)
+// for `place NAME at link[EXPR]` declarations, building each body's own
+// alias table (t.placeAliases) — scoped per body, not file-global, since
+// placement makes multiple distinct, differently-roled procs normal in
+// one file and a file-global table would force artificial cross-proc name
+// uniqueness. Run once, early in Transform(), before transform() itself
+// (which calls matchPlaceAliasDecl to erase the declaration from the
+// output, and matchLinkReceive/matchLinkSend to resolve alias uses via
+// resolvePlaceAlias) — mirroring the existing usedAltN/usedSplitN2D
+// prescan's own timing. Rejects an alias literally named `link` (it would
+// silently and confusingly shadow the real thing) or declared twice in
+// the same scope, right here rather than as a separate pass, since this
+// scan already visits every declaration in order and duplicate detection
+// falls out for free; checkPlaceAliasNames handles the one rule that
+// needs whole-file information instead (collision with a proc/func name).
+func (t *transformer) collectPlaceAliases() error {
+	for _, br := range t.collectFuncBodyRanges() {
+		lo, hi := br[0], br[1]
+		var aliases map[string]string
+		for i := lo; i < hi; i++ {
+			if !(t.toks[i].tok == token.IDENT && t.toks[i].lit == "place" &&
+				i+1 < hi && t.toks[i+1].tok == token.IDENT &&
+				i+2 < hi && t.toks[i+2].tok == token.IDENT && t.toks[i+2].lit == "at" &&
+				i+3 < hi && t.toks[i+3].tok == token.IDENT && t.toks[i+3].lit == "link" &&
+				i+4 < hi && t.toks[i+4].tok == token.LBRACK) {
+				continue
+			}
+			name := t.toks[i+1].lit
+			open := i + 4
+			close := matchBracket(t.toks, open)
+			idxExpr := strings.TrimSpace(string(t.src[t.off(t.toks[open+1].pos):t.off(t.toks[close].pos)]))
+			if name == "link" {
+				return fmt.Errorf("%s: place alias %q may not shadow the reserved `link` identifier", t.file.Position(t.toks[i].pos), name)
+			}
+			if aliases == nil {
+				aliases = make(map[string]string)
+			}
+			if _, dup := aliases[name]; dup {
+				return fmt.Errorf("%s: place alias %q declared more than once in the same scope", t.file.Position(t.toks[i].pos), name)
+			}
+			aliases[name] = idxExpr
+		}
+		if aliases != nil {
+			t.placeAliases = append(t.placeAliases, placeAliasScope{bodyLo: lo, bodyHi: hi, aliases: aliases})
+		}
+	}
+	return nil
+}
+
+// checkPlaceAliasNames rejects a place alias that collides with any
+// top-level proc/func name in the file — the one place-alias-name rule
+// that needs whole-file information rather than falling out of
+// collectPlaceAliases' own single scoped pass (see its doc comment for
+// the other two). A stray reference to an alias name outside its scope
+// needs no check here — it passes through untouched and Go's own
+// compiler rejects it (`undefined: NAME`), the same fallback this file
+// relies on elsewhere (e.g. a wrong `link` index isn't validated either).
+func (t *transformer) checkPlaceAliasNames() error {
+	procNames := map[string]bool{}
+	for i := 0; i+1 < len(t.toks); i++ {
+		isProc := t.toks[i].tok == token.IDENT && t.toks[i].lit == "proc"
+		if (isProc || t.toks[i].tok == token.FUNC) && t.toks[i+1].tok == token.IDENT {
+			procNames[t.toks[i+1].lit] = true
+		}
+	}
+	for _, scope := range t.placeAliases {
+		for name := range scope.aliases {
+			if procNames[name] {
+				return fmt.Errorf("place alias %q collides with a proc/func name", name)
+			}
+		}
+	}
+	return nil
+}
+
+// isPlaceAlias reports whether the identifier token at i is a resolvable
+// place-alias name, without needing the index it resolves to — used by
+// the reject-if-`link` guards in parseAltGuard and matchSwitchTypeGuard,
+// which stay unsupported for an aliased link exactly like a literal
+// `link[...]` already is.
+func (t *transformer) isPlaceAlias(i int) bool {
+	_, ok := t.resolvePlaceAlias(i)
+	return ok
+}
+
+// resolvePlaceAlias reports whether the identifier token at i is a
+// place-alias name usable at this position — i.e. it falls within some
+// proc/func body that declared it via `place NAME at link[EXPR]` (see
+// collectPlaceAliases) — returning the link index expression's source
+// text it stands for.
+func (t *transformer) resolvePlaceAlias(i int) (idxExpr string, ok bool) {
+	if t.toks[i].tok != token.IDENT {
+		return "", false
+	}
+	name := t.toks[i].lit
+	for _, scope := range t.placeAliases {
+		if i < scope.bodyLo || i >= scope.bodyHi {
+			continue
+		}
+		if idx, found := scope.aliases[name]; found {
+			return idx, true
+		}
+	}
+	return "", false
+}
+
+// matchPlaceAliasDecl recognizes `place NAME at link[EXPR]` as a whole
+// statement — a compile-time-only declaration; collectPlaceAliases (run
+// earlier, before transform()) does the actual NAME -> EXPR binding, so
+// this only needs to recognize the shape and report where it ends, so
+// transform can erase it from the output (matching how a bare `skip`
+// statement erases itself: just the recognized tokens, leaving whatever
+// naturally follows — a `;` or `}` — for the outer scan to copy through
+// unchanged, a harmless empty statement). `place`/`at` are contextual
+// soft keywords, only meaningful in this exact five-token shape at a
+// statement start — neither is a Go keyword, so ordinary identifier use
+// elsewhere is unaffected.
+func (t *transformer) matchPlaceAliasDecl(lo, hi int) (end int, ok bool) {
+	if !t.isStmtStart(lo) {
+		return 0, false
+	}
+	if !(t.toks[lo].tok == token.IDENT && t.toks[lo].lit == "place" &&
+		lo+1 < hi && t.toks[lo+1].tok == token.IDENT &&
+		lo+2 < hi && t.toks[lo+2].tok == token.IDENT && t.toks[lo+2].lit == "at" &&
+		lo+3 < hi && t.toks[lo+3].tok == token.IDENT && t.toks[lo+3].lit == "link" &&
+		lo+4 < hi && t.toks[lo+4].tok == token.LBRACK) {
+		return 0, false
+	}
+	close := matchBracket(t.toks, lo+4)
+	return close + 1, true
+}
+
+// matchLinkReceive recognizes `link[idx] -> var` as a whole statement, or
+// `ALIAS -> var` where ALIAS was bound to a link index by a `place ALIAS
+// at link[EXPR]` declaration in this same proc/func body (see
+// resolvePlaceAlias) — `link` is Bil's reserved, index-addressed array of
+// nearest-neighbour links (an emulator concept: see
+// ../../emulator/README.md and its nodeprog/bilink package), not a real
+// Go channel — the physical link crosses a WASM-instance/Worker boundary,
+// which no in-process Go channel can express. `link[idx]` already parses
+// as an ordinary primary expression (parsePrimaryExpr handles `base[idx]`
+// generically), so matchArrowReceive already matches it structurally;
+// this just narrows that match to exactly `link[idx]` (rejecting a
+// call-shaped target or any chaining past the single index, like
+// `link[idx].field`) — or, for the alias form, to a bare identifier with
+// no chaining at all, since an alias always stands for a whole `link[idx]`
+// expression, never something further indexable — and reports the index
+// and bind-variable source separately, so the caller can emit `var =
+// bilink.Recv(idx)` instead of a plain `<-`. Only the assign arrow (`->`)
+// with no comma-ok suffix is supported for now — `link[idx] :-> var`
+// (declare) and `link[idx] -> var, ok` (comma-ok) aren't part of this
+// construct yet, for either spelling.
 func (t *transformer) matchLinkReceive(lo, hi int) (idxSrc, varSrc string, end int, ok bool) {
-	if lo >= hi || t.toks[lo].tok != token.IDENT || t.toks[lo].lit != "link" {
+	if lo >= hi || t.toks[lo].tok != token.IDENT {
 		return "", "", 0, false
+	}
+	isLiteralLink := t.toks[lo].lit == "link"
+	var aliasIdx string
+	if !isLiteralLink {
+		aliasIdx, ok = t.resolvePlaceAlias(lo)
+		if !ok {
+			return "", "", 0, false
+		}
 	}
 	rhsLo, rhsHi, lhsEnd, kind, _, hasOk, matchEnd, isCall, ok := t.matchArrowReceive(lo, hi)
 	if !ok || isCall || kind != arrowAssign || hasOk {
 		return "", "", 0, false
 	}
-	if lo+1 >= hi || t.toks[lo+1].tok != token.LBRACK {
-		return "", "", 0, false
+	if isLiteralLink {
+		if lo+1 >= hi || t.toks[lo+1].tok != token.LBRACK {
+			return "", "", 0, false
+		}
+		open := lo + 1
+		close := matchBracket(t.toks, open)
+		if close+1 != lhsEnd {
+			return "", "", 0, false // trailing chain past `link[idx]` — not supported
+		}
+		idxSrc = string(t.src[t.off(t.toks[open+1].pos):t.off(t.toks[close].pos)])
+	} else {
+		if lhsEnd != lo+1 {
+			return "", "", 0, false // trailing chain past a bare alias — not supported
+		}
+		idxSrc = aliasIdx
 	}
-	open := lo + 1
-	close := matchBracket(t.toks, open)
-	if close+1 != lhsEnd {
-		return "", "", 0, false // trailing chain past `link[idx]` — not supported
-	}
-	idxSrc = string(t.src[t.off(t.toks[open+1].pos):t.off(t.toks[close].pos)])
 	varSrc = string(t.src[t.off(t.toks[rhsLo].pos):t.off(t.toks[rhsHi].pos)])
 	return idxSrc, varSrc, matchEnd, true
 }
 
-// matchLinkSend recognizes `link[idx] <- value` as a whole statement —
-// the send-side counterpart to matchLinkReceive; see its doc comment
-// for why `link` needs rewriting to a bilink call rather than passing
-// through as plain Go (which is otherwise never needed for a send:
-// `chan <- value` is already legal Go, so no other channel send in
-// this file gets special-cased the way receives are). value's end is
-// found by scanning to the enclosing statement's terminator (the `;`
-// go/scanner inserts at line end, or the block's closing `}`), tracking
-// paren/bracket/brace depth so a nested call or composite literal in
-// the value expression doesn't end the scan early.
+// matchLinkSend recognizes `link[idx] <- value` as a whole statement, or
+// `ALIAS <- value` for a resolvable place-alias — the send-side
+// counterpart to matchLinkReceive; see its doc comment for why `link`
+// needs rewriting to a bilink call rather than passing through as plain
+// Go (which is otherwise never needed for a send: `chan <- value` is
+// already legal Go, so no other channel send in this file gets
+// special-cased the way receives are). value's end is found by scanning
+// to the enclosing statement's terminator (the `;` go/scanner inserts at
+// line end, or the block's closing `}`), tracking paren/bracket/brace
+// depth so a nested call or composite literal in the value expression
+// doesn't end the scan early.
 func (t *transformer) matchLinkSend(lo, hi int) (idxSrc, valSrc string, end int, ok bool) {
 	if !t.isStmtStart(lo) {
 		return "", "", 0, false
 	}
-	if lo >= hi || t.toks[lo].tok != token.IDENT || t.toks[lo].lit != "link" {
+	if lo >= hi || t.toks[lo].tok != token.IDENT {
 		return "", "", 0, false
 	}
-	if lo+1 >= hi || t.toks[lo+1].tok != token.LBRACK {
+	var closeAfter int // index of the last token of the index/alias expression
+	if t.toks[lo].lit == "link" {
+		if lo+1 >= hi || t.toks[lo+1].tok != token.LBRACK {
+			return "", "", 0, false
+		}
+		open := lo + 1
+		close := matchBracket(t.toks, open)
+		idxSrc = string(t.src[t.off(t.toks[open+1].pos):t.off(t.toks[close].pos)])
+		closeAfter = close
+	} else {
+		aliasIdx, aliasOK := t.resolvePlaceAlias(lo)
+		if !aliasOK {
+			return "", "", 0, false
+		}
+		idxSrc = aliasIdx
+		closeAfter = lo
+	}
+	if closeAfter+1 >= hi || t.toks[closeAfter+1].tok != token.ARROW {
 		return "", "", 0, false
 	}
-	open := lo + 1
-	close := matchBracket(t.toks, open)
-	if close+1 >= hi || t.toks[close+1].tok != token.ARROW {
-		return "", "", 0, false
-	}
-	idxSrc = string(t.src[t.off(t.toks[open+1].pos):t.off(t.toks[close].pos)])
-	valLo := close + 2
+	valLo := closeAfter + 2
 	depth := 0
 	j := valLo
 	for j < hi {
@@ -1168,8 +1382,8 @@ foundEnd:
 // flat walk, picked up automatically like any other `{ }` block's
 // contents.
 func (t *transformer) matchSwitchTypeGuard(lo, hi int) (chanSrc, varSrc string, brace int, ok bool) {
-	if lo < hi && t.toks[lo].tok == token.IDENT && t.toks[lo].lit == "link" {
-		return "", "", 0, false // see matchLinkReceive; not a real channel, no type-switch dispatch
+	if lo < hi && t.toks[lo].tok == token.IDENT && (t.toks[lo].lit == "link" || t.isPlaceAlias(lo)) {
+		return "", "", 0, false // see matchLinkReceive; not a real channel, no type-switch dispatch (aliased or not)
 	}
 	lhsEnd, ok1 := t.parsePrimaryExpr(lo, hi)
 	if !ok1 {
@@ -1206,6 +1420,151 @@ func (t *transformer) matchSwitchTypeGuard(lo, hi int) (chanSrc, varSrc string, 
 	}
 	chanSrc = string(t.src[t.off(t.toks[lo].pos):t.off(t.toks[lhsEnd].pos)])
 	return chanSrc, varSrc, i, true
+}
+
+// splitCommaExprs splits the token range [lo,hi) into comma-separated
+// segments, respecting paren/bracket/brace nesting so a call or index
+// expression's own internal comma doesn't split early -- needed because
+// `processor(...)`'s arguments are arbitrary Go expressions (`cols-1`,
+// say), not bare identifiers parsePrimaryExpr could handle. Only the
+// segments' source text is needed (Go's own compiler validates each
+// expression once transpiled, the same fallback this file relies on
+// elsewhere), so this doesn't attempt to parse expression grammar at all
+// -- just find top-level commas. ok is false only for an empty range
+// (`processor()`, no arguments at all).
+func (t *transformer) splitCommaExprs(lo, hi int) (exprs []string, ok bool) {
+	if lo >= hi {
+		return nil, false
+	}
+	depth := 0
+	segStart := lo
+	for i := lo; i < hi; i++ {
+		switch t.toks[i].tok {
+		case token.LPAREN, token.LBRACK, token.LBRACE:
+			depth++
+		case token.RPAREN, token.RBRACK, token.RBRACE:
+			depth--
+		case token.COMMA:
+			if depth == 0 {
+				exprs = append(exprs, strings.TrimSpace(string(t.src[t.off(t.toks[segStart].pos):t.off(t.toks[i].pos)])))
+				segStart = i + 1
+			}
+		}
+	}
+	exprs = append(exprs, strings.TrimSpace(string(t.src[t.off(t.toks[segStart].pos):t.off(t.toks[hi].pos)])))
+	return exprs, true
+}
+
+// placedClause is one parsed clause inside a `placed par { ... }` block:
+// either `processor(ID) { BODY }` (idExpr set, the flat, topology-agnostic
+// form backed by bilink.ID()), `processor(R, C) { BODY }` (rowExpr/colExpr
+// set, the grid-convenient form backed by bilink.Row()/Col()), or
+// `default { BODY }` (isDefault set). Both processor arities are always
+// available side by side in the same block -- neither desugars through the
+// other, they're two independent, valid ways to write the same underlying
+// switch case (see the "Design decisions" discussion this construct came
+// out of: occam's own PROCESSOR is a topology-agnostic flat int, but a 2D
+// grid is Bil's dominant case and deserves not to need row*cols+col
+// arithmetic by hand).
+type placedClause struct {
+	isDefault      bool
+	idExpr         string
+	rowExpr        string
+	colExpr        string
+	bodyLo, bodyHi int
+}
+
+// parsePlacedParClauses parses every clause of a `placed par { ... }` block
+// ([lo,hi) is the block's interior; hi is the index of its closing `}`).
+// An optional `default { BODY }` must come last if present -- placement's
+// whole point is the identity gate, so every other clause must be a
+// `processor(...)`, never a bare `proc` call/seq/nested par/bare block the
+// way an ordinary `par`'s branches can be.
+func (t *transformer) parsePlacedParClauses(lo, hi int) (clauses []placedClause, ok bool) {
+	j := lo
+	sawDefault := false
+	for j < hi {
+		if t.toks[j].tok == token.SEMICOLON {
+			j++
+			continue
+		}
+		if sawDefault {
+			return nil, false // default must be the last clause
+		}
+		if t.toks[j].tok == token.DEFAULT {
+			j++
+			if j >= hi || t.toks[j].tok != token.LBRACE {
+				return nil, false
+			}
+			bodyClose := matchBrace(t.toks, j)
+			clauses = append(clauses, placedClause{isDefault: true, bodyLo: j + 1, bodyHi: bodyClose})
+			j = bodyClose + 1
+			sawDefault = true
+			continue
+		}
+		if t.toks[j].tok != token.IDENT || t.toks[j].lit != "processor" {
+			return nil, false
+		}
+		j++
+		if j >= hi || t.toks[j].tok != token.LPAREN {
+			return nil, false
+		}
+		parenClose := matchParen(t.toks, j)
+		exprs, ok := t.splitCommaExprs(j+1, parenClose)
+		if !ok || len(exprs) < 1 || len(exprs) > 2 {
+			return nil, false
+		}
+		j = parenClose + 1
+		if j >= hi || t.toks[j].tok != token.LBRACE {
+			return nil, false
+		}
+		bodyClose := matchBrace(t.toks, j)
+		cl := placedClause{bodyLo: j + 1, bodyHi: bodyClose}
+		if len(exprs) == 1 {
+			cl.idExpr = exprs[0]
+		} else {
+			cl.rowExpr, cl.colExpr = exprs[0], exprs[1]
+		}
+		clauses = append(clauses, cl)
+		j = bodyClose + 1
+	}
+	if len(clauses) == 0 {
+		return nil, false
+	}
+	return clauses, true
+}
+
+// emitPlacedParClauses parses and emits a `placed par { ... }` block as a
+// plain Go `switch` -- never `par(...)`/goroutines, since exactly one
+// branch may ever execute per running node; reusing `par` (which spawns
+// every branch as a goroutine) would run every role's code in this node's
+// own process at once. Each clause's `case`/`default` header and body are
+// written here directly rather than left for the outer scan to pick up
+// its body on its own -- writing the header text through the opening `{`
+// ourselves and recursing into the body via t.transform() avoids the
+// ASI/`//line`-resync pitfall documented on matchSwitchTypeGuard's
+// transform() case: a forced newline right after synthetic text ending in
+// a token Go's automatic semicolon insertion fires after (like `)`)
+// silently breaks the emitted Go, whereas `{`/`:` are never such tokens.
+func (t *transformer) emitPlacedParClauses(out *bytes.Buffer, lo, hi int) {
+	clauses, ok := t.parsePlacedParClauses(lo, hi)
+	if !ok {
+		panic(fmt.Sprintf("unsupported placed-par shape at %q (%v)", t.toks[lo].lit, t.toks[lo].tok))
+	}
+	out.WriteString("switch {\n")
+	for _, cl := range clauses {
+		switch {
+		case cl.isDefault:
+			out.WriteString("default:\n")
+		case cl.idExpr != "":
+			out.WriteString("case bilink.ID() == " + cl.idExpr + ":\n")
+		default:
+			out.WriteString("case bilink.Row() == " + cl.rowExpr + " && bilink.Col() == " + cl.colExpr + ":\n")
+		}
+		out.Write(t.transform(cl.bodyLo, cl.bodyHi))
+		out.WriteString("\n")
+	}
+	out.WriteString("}")
 }
 
 // emitAltClauses parses every clause of an `alt { ... }` block ([lo,hi) is
@@ -1418,6 +1777,22 @@ func (t *transformer) transform(lo, hi int) []byte {
 			out.WriteString("func")
 			cursor = t.off(tk.pos) + len("proc")
 			i++
+
+		case tk.tok == token.IDENT && tk.lit == "placed" &&
+			i+1 < hi && t.toks[i+1].tok == token.IDENT && t.toks[i+1].lit == "par" &&
+			i+2 < hi && t.toks[i+2].tok == token.LBRACE:
+			// `placed par { processor(...) { BODY } ... default { BODY } }`
+			// — see emitPlacedParClauses. "placed" and "par" are distinct
+			// token literals (never equal), so this needs no ordering
+			// relative to the plain `par` cases below the way `pri alt`
+			// needs checking before plain `alt` — there's no shape either
+			// case here could mistake for the other's.
+			flushTo(t.off(tk.pos))
+			close := matchBrace(t.toks, i+2)
+			t.emitPlacedParClauses(&out, i+3, close)
+			cursor = t.off(t.toks[close].pos) + 1
+			i = close + 1
+			t.usedPlacement = true
 
 		case tk.tok == token.IDENT && tk.lit == "pri" &&
 			i+1 < hi && t.toks[i+1].tok == token.IDENT && t.toks[i+1].lit == "alt" &&
@@ -1653,7 +2028,11 @@ func (t *transformer) transform(lo, hi int) []byte {
 			}
 
 		case tk.tok == token.IDENT:
-			if idxSrc, varSrc, end, ok := t.matchLinkReceive(i, hi); ok {
+			if end, ok := t.matchPlaceAliasDecl(i, hi); ok {
+				flushTo(t.off(tk.pos))
+				cursor = t.off(t.toks[end].pos)
+				i = end
+			} else if idxSrc, varSrc, end, ok := t.matchLinkReceive(i, hi); ok {
 				flushTo(t.off(tk.pos))
 				out.WriteString(varSrc + " = bilink.Recv(" + idxSrc + ")")
 				cursor = t.off(t.toks[end].pos)
@@ -1839,6 +2218,12 @@ func Transform(filename string, src []byte) ([]byte, error) {
 	if err := t.checkNoBufferedChannels(); err != nil {
 		return nil, err
 	}
+	if err := t.collectPlaceAliases(); err != nil {
+		return nil, err
+	}
+	if err := t.checkPlaceAliasNames(); err != nil {
+		return nil, err
+	}
 	body := t.transform(0, len(t.toks)-1) // exclude EOF sentinel
 
 	// Inject `import "sync"` right after the package clause, and append the
@@ -1869,12 +2254,13 @@ func Transform(filename string, src []byte) ([]byte, error) {
 	}
 	pkgEnd += pkgStart
 	var full bytes.Buffer
-	if t.usedLink {
+	if t.usedLink || t.usedPlacement {
 		// bilink only exists under this build constraint (it's backed by
-		// syscall/js) -- a program using `link[...]` can only ever run
-		// there, so this is auto-injected the same way the import is,
-		// rather than left for whoever places the generated file to
-		// remember by hand.
+		// syscall/js) -- a program using `link[...]` or `placed par`
+		// (which also calls into bilink, for Row()/Col()/ID()) can only
+		// ever run there, so this is auto-injected the same way the
+		// import is, rather than left for whoever places the generated
+		// file to remember by hand.
 		full.WriteString("//go:build js && wasm\n\n")
 	}
 	full.Write(body[:pkgEnd])
@@ -1885,7 +2271,7 @@ func Transform(filename string, src []byte) ([]byte, error) {
 	if t.usedAltN && !t.hasImport("reflect") {
 		full.WriteString("\nimport \"reflect\"\n")
 	}
-	if t.usedLink && !t.hasImport("emulator/nodeprog/bilink") {
+	if (t.usedLink || t.usedPlacement) && !t.hasImport("emulator/nodeprog/bilink") {
 		full.WriteString("\nimport \"emulator/nodeprog/bilink\"\n")
 	}
 	full.Write(body[pkgEnd:])
