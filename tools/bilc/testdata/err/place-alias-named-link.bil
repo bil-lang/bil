@@ -1,0 +1,11 @@
+package main
+
+proc controller() {
+	place link at link[0]
+	var v int32
+	link -> v
+}
+
+func main() {
+	controller()
+}

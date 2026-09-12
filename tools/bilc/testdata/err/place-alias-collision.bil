@@ -1,0 +1,15 @@
+package main
+
+proc controller() {
+	place relay at link[1]
+	var v int32
+	relay -> v
+}
+
+proc relay() {
+	println("relay")
+}
+
+func main() {
+	controller()
+}

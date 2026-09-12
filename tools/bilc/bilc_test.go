@@ -294,6 +294,155 @@ func main() {
 	}
 }
 
+// TestPlacedParRewrite checks that `placed par` rewrites to a plain Go
+// `switch`, exercising both `processor(...)` arities (flat ID and 2D) side
+// by side in one block, plus `default`, and that it triggers the same
+// build-tag/bilink-import auto-injection `link[...]` does (see
+// TestLinkRewrite) — `placed par` calls into bilink for
+// Row()/Col()/ID() even though it never writes `link[...]` itself.
+func TestPlacedParRewrite(t *testing.T) {
+	src := []byte(`package main
+
+proc boot() {
+	println("boot")
+}
+
+proc controller() {
+	println("controller")
+}
+
+proc relay() {
+	println("relay")
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			boot()
+		}
+		processor(0, 0) {
+			controller()
+		}
+		default {
+			relay()
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"switch {",
+		"case bilink.ID() == 0:",
+		"case bilink.Row() == 0 && bilink.Col() == 0:",
+		"default:",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, "//go:build js && wasm") {
+		t.Errorf("expected the js/wasm build tag to be auto-injected, got:\n%s", got)
+	}
+	if n := strings.Count(got, `"emulator/nodeprog/bilink"`); n != 1 {
+		t.Errorf("expected exactly one bilink import, got %d in:\n%s", n, got)
+	}
+}
+
+// TestPlacedParDoesNotAffectOrdinaryPar combines an ordinary `par{...}`
+// and a `placed par{...}` in the same file — "placed" and "par" are
+// distinct token literals with no shape either construct's case in
+// transform() could mistake for the other's (see the design notes in
+// bilc.go), so this is a sanity check, not a regression test for a bug:
+// unlike an earlier, now-superseded design (bil-occamy's PLACEMENT-DESIGN.md,
+// written against a different, token-substring-based checker this
+// codebase doesn't have), there's no confirmed bug here to guard against.
+func TestPlacedParDoesNotAffectOrdinaryPar(t *testing.T) {
+	src := []byte(`package main
+
+proc worker(c chan<- int) {
+	c <- 1
+}
+
+proc controller() {
+	println("controller")
+}
+
+func main() {
+	c := make(chan int)
+	par {
+		worker(c)
+		seq {
+			var v int
+			c -> v
+			println(v)
+		}
+	}
+
+	placed par {
+		processor(0) {
+			controller()
+		}
+		default {
+			println("default")
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "par(\n") {
+		t.Errorf("expected the ordinary par{} to still rewrite to par(...), got:\n%s", got)
+	}
+	if !strings.Contains(got, "switch {") {
+		t.Errorf("expected the placed par{} to rewrite to switch {, got:\n%s", got)
+	}
+}
+
+// TestPlaceAliasRewrite mirrors TestLinkRewrite: an alias declared via
+// `place NAME at link[EXPR]` is used for both a receive and a send, and
+// the alias declaration itself, plus every trace of the alias name, is
+// gone from the output — resolved straight to the link index it stands
+// for, exactly as if `link[EXPR]` had been written directly.
+func TestPlaceAliasRewrite(t *testing.T) {
+	src := []byte(`package main
+
+proc node() {
+	place toEast at link[east]
+	var v int32
+	toEast -> v
+	toEast <- v
+}
+
+func main() {
+	node()
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "v = bilink.Recv(east)") {
+		t.Errorf("expected `toEast -> v` to rewrite to `v = bilink.Recv(east)`, got:\n%s", got)
+	}
+	if !strings.Contains(got, "bilink.Send(east, v)") {
+		t.Errorf("expected `toEast <- v` to rewrite to `bilink.Send(east, v)`, got:\n%s", got)
+	}
+	if strings.Contains(got, "toEast") {
+		t.Errorf("expected the alias declaration and every use of it to be rewritten away, got:\n%s", got)
+	}
+	if !strings.Contains(got, `import "emulator/nodeprog/bilink"`) {
+		t.Errorf("expected the bilink import to be auto-injected, got:\n%s", got)
+	}
+}
+
 // TestLineDirectives checks that Transform's `//line` directives (see
 // resync in bilc.go) correctly map error positions in the transpiled Go
 // back to the original .bil file and line — the mechanism tools/vet and
