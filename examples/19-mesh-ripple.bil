@@ -14,11 +14,11 @@
 // `link` is Bil's reserved index-addressed array of nearest-neighbour
 // links — not an ordinary channel, so `link[i] -> x` / `link[i] <- v`
 // compile to a genuine cross-Worker rendezvous (bilink.Recv/Send), not
-// an in-process Go channel op. north/east/south/west below are just
-// this program's own choice of names for indices 0-3 — that mapping
-// is a convention owned entirely by the emulator's topology layer
-// (../../emulator/static/index.html's buildTopology), not by bilc or
-// bilink; a different topology would pick different names, or none.
+// an in-process Go channel op. link[1] is east and link[3] is west
+// below — that mapping is a convention owned entirely by the
+// emulator's topology layer (../../emulator/static/index.html's
+// buildTopology), not by bilc or bilink; a different topology would
+// number its links differently.
 // This mirrors ../../emulator/nodeprog/ripple/main.go, the
 // hand-written Go version of this same demo built during the
 // emulator's Phase A, now running as real compiled Bil instead.
@@ -26,13 +26,6 @@
 package main
 
 import "time"
-
-const (
-	north = 0
-	east  = 1
-	south = 2
-	west  = 3
-)
 
 const waves = 3
 
@@ -58,30 +51,30 @@ proc node() {
 			// originate the wave east, then await its reflection back via the same link
 			time.Sleep(hopDelay)
 			bilink.Screenf("wave %d: send east = %d", wave, wave)
-			link[east] <- int32(wave)
+			link[1] <- int32(wave)
 			var v int32
-			link[east] -> v
+			link[1] -> v
 			bilink.Screenf("wave %d: reflected back = %d", wave, v)
 		} else if c == cols-1 {
 			// last column: receive, then reflect straight back west
 			var v int32
-			link[west] -> v
+			link[3] -> v
 			bilink.Screenf("wave %d: got %d, reflecting", wave, v)
 			time.Sleep(hopDelay)
-			link[west] <- v
+			link[3] <- v
 		} else {
 			// middle: forward the wave east, then forward its reflection west
 			var v int32
-			link[west] -> v
+			link[3] -> v
 			bilink.Screenf("wave %d: got %d, forward east", wave, v)
 			time.Sleep(hopDelay)
-			link[east] <- v
+			link[1] <- v
 
 			var v2 int32
-			link[east] -> v2
+			link[1] -> v2
 			bilink.Screenf("wave %d: reflection %d, forward west", wave, v2)
 			time.Sleep(hopDelay)
-			link[west] <- v2
+			link[3] <- v2
 		}
 	}
 

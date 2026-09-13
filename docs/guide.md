@@ -1,3 +1,34 @@
+
+
+### What bilc does with placement
+
+A `.bil` source file expresses placement with two constructs: a `placed par { processor(...) {...} ... default {...} }` block naming which role runs where, and `place NAME at link[EXPR]` aliases inside a role's body giving a short local name to one of its links. bilc's action on these, specifically, is two rewrites plus one side artifact.
+
+**Rewrite 1 — `placed par` becomes a runtime switch.** Each `processor(id)` clause becomes `case bilink.ID() == id:`; each `processor(r, c)` clause becomes `case bilink.Row() == r && bilink.Col() == c:`; `default` becomes Go's own `default:`. The result is one ordinary `switch {}` in the compiled program — not a `par(...)`, not goroutines, not multiple binaries. Every node's Worker runs the exact same compiled `node.wasm`; which branch a given node takes depends on `bilink.Row()/Col()/ID()`, which are only known once the emulator's page-side bootstrap has told that specific Worker who it is (see `bilink.go`'s doc comment for that wiring). So placement genuinely means "one binary, N different code paths taken at runtime," not "N binaries, one path each."
+
+**Rewrite 2 — `place NAME at link[EXPR]` becomes nothing at all.** It's compile-time-only sugar: bilc just remembers that `NAME` means `link[EXPR]` for the rest of that proc's body, so `toEast <- v` and `link[1] <- v` compile to the identical `bilink.Send` call. No runtime cost, no generated code of its own.
+
+**Side artifact — a `.topology.yaml` manifest.** Whenever a source file contains a `placed par` block, bilc also writes a manifest next to the compiled `.go` file: same directory, same basename, extension swapped to `.topology.yaml`. So `bilc examples/20-placed-controller.bil nodeprog/placedcontroller/main.go` also produces `nodeprog/placedcontroller/main.topology.yaml`. A file with no `placed par` gets no manifest at all — nothing is written.
+
+Here's the actual manifest bilc currently produces for `examples/20-placed-controller.bil`:
+
+```yaml
+placements:
+  - match: {row: 0, col: 0}
+    proc: controller
+  - match: {row: 0, col: "cols-1"}
+    proc: rowEnd
+default:
+links:
+  aliases:
+    controller: {toEast: 1}
+    relay: {fromWest: 3, toEast: 1}
+    rowEnd: {toWest: 3}
+```
+
+Two things worth noticing, both deliberate rather than bugs: `col: "cols-1"` is quoted because it's an unresolved Go expression, not a literal — `cols` is a value only known once the emulator launches a grid of some chosen size, which bilc never knows at compile time. And `default:` has no `proc:` line, because that clause's body is an `if`/`else` (relay vs. idle depending on row), not a single bare call bilc can name — rather than guess, it leaves it blank. The manifest only ever describes declared *structure*, never fully-resolved concrete positions.
+
+
 <a id="top"></a>
 
 # The Bil Guide

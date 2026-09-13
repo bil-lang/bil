@@ -18,21 +18,14 @@
 // name — `toEast`, `toWest`, `fromWest` — so a proc's body reads as
 // "receive from my west neighbour", not "receive from link[3]", with
 // the mapping declared once, right where the proc uses it, rather than
-// carried in your head the way Example 19's raw `link[west]` needs to
-// be. Purely a naming convenience: `place` emits no Go at all, and
+// carried in your head the way Example 19's raw `link[3]` needs to be.
+// Purely a naming convenience: `place` emits no Go at all, and
 // `toEast -> v` compiles to exactly the same `bilink.Recv` call
-// `link[east] -> v` would.
+// `link[1] -> v` would.
 
 package main
 
 import "time"
-
-const (
-	north = 0
-	east  = 1
-	south = 2
-	west  = 3
-)
 
 const rounds = 3
 const hopDelay = 150 * time.Millisecond
@@ -40,7 +33,7 @@ const hopDelay = 150 * time.Millisecond
 // controller runs at exactly one processor, (0,0): originates each
 // round's value east, then waits for it to come back reflected.
 proc controller(cols int) {
-	place toEast at link[east]
+	place toEast at link[1]
 	bilink.Screenf("controller ready, %d cols", cols)
 	for round := 0; round < rounds; round++ {
 		time.Sleep(hopDelay)
@@ -56,7 +49,7 @@ proc controller(cols int) {
 // rowEnd runs at (0,cols-1): the far end of row 0, reflecting whatever
 // arrives from the west straight back.
 proc rowEnd() {
-	place toWest at link[west]
+	place toWest at link[3]
 	bilink.Screenf("row-end ready")
 	for round := 0; round < rounds; round++ {
 		var v int32
@@ -72,8 +65,8 @@ proc rowEnd() {
 // relay runs on every other row-0 processor: forward east, forward
 // the reflection back west.
 proc relay() {
-	place fromWest at link[west]
-	place toEast at link[east]
+	place fromWest at link[3]
+	place toEast at link[1]
 	bilink.Screenf("relay ready")
 	for round := 0; round < rounds; round++ {
 		var v int32

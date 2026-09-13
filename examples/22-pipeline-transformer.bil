@@ -1,0 +1,506 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+//
+// A real Bil program running on the WASM-worker grid emulator
+// (../../emulator, a sibling repo — see its README and
+// STRATEGY.md's "Emulator architecture" note): the same tiny
+// transformer block as Example 21 (mesh-transformer), but this time
+// the mesh doesn't just relay tokens to one processor that does all
+// the work -- it genuinely distributes the compute using the grid's
+// full two dimensions, not just row 0.
+//
+// Dataflow architecture: chunk by column, pipeline by row.
+//
+// Each column holds one token position of the current generation
+// ("chunk"). Each of the first 4 mesh rows is one transformer
+// sub-stage, and a token's representation flows *south*, row to row,
+// as it passes through the stages:
+//
+//	row 0  embedStage     embedding + positional encoding
+//	row 1  attn*          self-attention + residual 1
+//	row 2  ffnStage       feed-forward + residual 2
+//	row 3  outputStage    output projection + argmax
+//
+// Three of these four stages -- embed, feed-forward, output -- are
+// purely per-token: no column needs any other column's data, so every
+// column in that row computes its slice of the model in parallel with
+// every other column, on genuinely separate Workers. Compare Example
+// 21, where all of this ran serially on a single processor. Only
+// attention is inherently non-local (every token's query needs every
+// other token's key/value), so row 1 alone falls back to Example 21's
+// already-verified controller/relay/rowEnd gather-compute-scatter
+// idiom over its own row's east/west links -- just carrying a whole
+// [dModel]float64 vector per hop (via sendVec/recvVec below) instead
+// of one scalar token.
+//
+// Pipelining across generations falls out for free: `link[i] <- v` is
+// a genuine blocking rendezvous with no buffering (see bilink.Send's
+// doc comment), so row 0 can't get more than one generation ahead of
+// row 1, row 1 can't get ahead of row 2, and so on -- but nothing
+// stops row 0 starting generation g+1's embedding the instant row 1
+// has drained generation g's, while row 2 is still doing g-1's
+// feed-forward and row 3 is finishing g-2's output. Steady-state
+// throughput is gated by the slowest stage (attention, the only one
+// with O(cols) relay hops instead of O(1) local work), the same way a
+// hardware pipeline's throughput is gated by its slowest stage.
+//
+// Needs at least 4 mesh rows (the emulator's default 6x7 grid
+// qualifies) -- rows 4+ just run `idle`, same as Example 21 leaves
+// every row but 0 idle.
+
+package main
+
+import (
+	"math"
+	"time"
+)
+
+const generations = 6
+const vocabSize = 4
+const dModel = 4
+const dFF = 8
+const stageRows = 4 // embed, attention, feed-forward, output
+
+// hopDelay is purely cosmetic -- the rendezvous itself already forces
+// correct pacing -- it just makes each hop visible on the grid.
+const hopDelay = 60 * time.Millisecond
+
+var vocab = [vocabSize]string{"the", "cat", "sat", "mat"}
+
+// embedding, wq/wk/wv, w1/b1/w2/b2 and wo are the same fixed,
+// hand-picked weights Example 21 used -- illustrative numbers for a
+// from-scratch demo, not a trained model. The point of this example
+// is the distributed dataflow architecture, not prediction quality.
+var embedding = [vocabSize][dModel]float64{
+	{0.10, 0.20, 0.30, 0.40},
+	{0.40, 0.10, 0.20, 0.30},
+	{0.30, 0.40, 0.10, 0.20},
+	{0.20, 0.30, 0.40, 0.10},
+}
+
+var wq = [dModel][dModel]float64{
+	{1, 0, 0, 1},
+	{0, 1, 1, 0},
+	{1, 1, 0, 0},
+	{0, 0, 1, 1},
+}
+
+var wk = [dModel][dModel]float64{
+	{1, 1, 0, 0},
+	{0, 0, 1, 1},
+	{1, 0, 1, 0},
+	{0, 1, 0, 1},
+}
+
+var wv = [dModel][dModel]float64{
+	{1, 0, 1, 0},
+	{0, 1, 0, 1},
+	{1, 1, 1, 1},
+	{0, 0, 0, 1},
+}
+
+var w1 = [dModel][dFF]float64{
+	{0.2, -0.1, 0.3, 0.0, -0.2, 0.1, 0.0, 0.3},
+	{-0.1, 0.2, 0.0, 0.3, 0.1, -0.2, 0.3, 0.0},
+	{0.3, 0.0, -0.1, 0.2, 0.0, 0.3, -0.2, 0.1},
+	{0.0, 0.3, 0.2, -0.1, 0.3, 0.0, 0.1, -0.2},
+}
+var b1 = [dFF]float64{0.05, -0.05, 0.05, -0.05, 0.05, -0.05, 0.05, -0.05}
+
+var w2 = [dFF][dModel]float64{
+	{0.2, -0.1, 0.1, 0.0},
+	{-0.1, 0.2, 0.0, 0.1},
+	{0.1, 0.0, 0.2, -0.1},
+	{0.0, 0.1, -0.1, 0.2},
+	{0.2, 0.0, -0.1, 0.1},
+	{0.0, 0.2, 0.1, -0.1},
+	{-0.1, 0.1, 0.0, 0.2},
+	{0.1, -0.1, 0.2, 0.0},
+}
+var b2 = [dModel]float64{0, 0, 0, 0}
+
+var wo = [dModel][vocabSize]float64{
+	{0.5, -0.2, 0.1, 0.0},
+	{0.0, 0.5, -0.2, 0.1},
+	{0.1, 0.0, 0.5, -0.2},
+	{-0.2, 0.1, 0.0, 0.5},
+}
+
+func wordAt(tok int) string { return vocab[tok%vocabSize] }
+
+func posEncode(pos int) [dModel]float64 {
+	var pe [dModel]float64
+	for i := 0; i < dModel; i += 2 {
+		freq := 1.0 / math.Pow(10000, float64(i)/float64(dModel))
+		pe[i] = math.Sin(float64(pos) * freq)
+		if i+1 < dModel {
+			pe[i+1] = math.Cos(float64(pos) * freq)
+		}
+	}
+	return pe
+}
+
+func add4(a, b [dModel]float64) [dModel]float64 {
+	var y [dModel]float64
+	for i := 0; i < dModel; i++ {
+		y[i] = a[i] + b[i]
+	}
+	return y
+}
+
+func matVec4(w [dModel][dModel]float64, x [dModel]float64) [dModel]float64 {
+	var y [dModel]float64
+	for i := 0; i < dModel; i++ {
+		sum := 0.0
+		for j := 0; j < dModel; j++ {
+			sum += w[i][j] * x[j]
+		}
+		y[i] = sum
+	}
+	return y
+}
+
+func dot4(a, b [dModel]float64) float64 {
+	sum := 0.0
+	for i := 0; i < dModel; i++ {
+		sum += a[i] * b[i]
+	}
+	return sum
+}
+
+func softmax(scores []float64) []float64 {
+	max := scores[0]
+	for _, s := range scores {
+		if s > max {
+			max = s
+		}
+	}
+	out := make([]float64, len(scores))
+	sum := 0.0
+	for i, s := range scores {
+		out[i] = math.Exp(s - max)
+		sum += out[i]
+	}
+	for i := range out {
+		out[i] /= sum
+	}
+	return out
+}
+
+func relu(x float64) float64 {
+	if x > 0 {
+		return x
+	}
+	return 0
+}
+
+func feedForward(x [dModel]float64) [dModel]float64 {
+	var hidden [dFF]float64
+	for j := 0; j < dFF; j++ {
+		sum := b1[j]
+		for i := 0; i < dModel; i++ {
+			sum += x[i] * w1[i][j]
+		}
+		hidden[j] = relu(sum)
+	}
+	var out [dModel]float64
+	for k := 0; k < dModel; k++ {
+		sum := b2[k]
+		for j := 0; j < dFF; j++ {
+			sum += hidden[j] * w2[j][k]
+		}
+		out[k] = sum
+	}
+	return out
+}
+
+func outputLogits(x [dModel]float64) [vocabSize]float64 {
+	var logits [vocabSize]float64
+	for k := 0; k < vocabSize; k++ {
+		sum := 0.0
+		for i := 0; i < dModel; i++ {
+			sum += x[i] * wo[i][k]
+		}
+		logits[k] = sum
+	}
+	return logits
+}
+
+func argmax4(v [vocabSize]float64) int {
+	best := 0
+	for i := 1; i < vocabSize; i++ {
+		if v[i] > v[best] {
+			best = i
+		}
+	}
+	return best
+}
+
+// runAttention runs self-attention plus the first residual connection
+// over a whole row's worth of already-embedded vectors -- exactly the
+// attention half of Example 21's runTransformer, stopping short of
+// the feed-forward/output steps, which happen two and three rows
+// further south instead.
+func runAttention(xs [][dModel]float64) [][dModel]float64 {
+	cols := len(xs)
+
+	q := make([][dModel]float64, cols)
+	k := make([][dModel]float64, cols)
+	v := make([][dModel]float64, cols)
+	for c := 0; c < cols; c++ {
+		q[c] = matVec4(wq, xs[c])
+		k[c] = matVec4(wk, xs[c])
+		v[c] = matVec4(wv, xs[c])
+	}
+
+	resid1 := make([][dModel]float64, cols)
+	for c := 0; c < cols; c++ {
+		scores := make([]float64, cols)
+		for j := 0; j < cols; j++ {
+			scores[j] = dot4(q[c], k[j]) / math.Sqrt(float64(dModel))
+		}
+		weights := softmax(scores)
+
+		var attnOut [dModel]float64
+		for j := 0; j < cols; j++ {
+			for i := 0; i < dModel; i++ {
+				attnOut[i] += weights[j] * v[j][i]
+			}
+		}
+
+		resid1[c] = add4(xs[c], attnOut)
+	}
+
+	return resid1
+}
+
+// sendVec/recvVec carry a whole [dModel]float64 vector across one
+// genuine cross-Worker link, one component at a time -- the physical
+// link fabric only carries a plain int32 per hop (see
+// bilink.Send/Recv), the same "one int32 at a time" idiom Example 21
+// used for scalar tokens, just repeated dModel times for a vector.
+// Each float64 crosses as its float32 bit pattern -- plenty of
+// precision for this demo's hand-picked weights.
+func sendVec(idx int, v [dModel]float64) {
+	for i := 0; i < dModel; i++ {
+		link[idx] <- int32(math.Float32bits(float32(v[i])))
+	}
+}
+
+func recvVec(idx int) [dModel]float64 {
+	var v [dModel]float64
+	for i := 0; i < dModel; i++ {
+		var bits int32
+		link[idx] -> bits
+		v[i] = float64(math.Float32frombits(uint32(bits)))
+	}
+	return v
+}
+
+// embedStage runs on every column of row 0: computes this
+// generation's synthetic input token locally (the same
+// (col+gen)%vocabSize convention Example 21's relay/rowEnd used),
+// embeds it, adds its positional encoding, and hands the result south
+// to row 1. Pure per-column work, no lateral communication at all --
+// every column of row 0 runs this in parallel with every other
+// column, unlike Example 21 where one processor did every column's
+// embedding serially.
+proc embedStage() {
+	c := bilink.Col()
+	bilink.Screenf("embed ready at col %d", c)
+
+	for gen := 0; gen < generations; gen++ {
+		tok := (c + gen) % vocabSize
+		x0 := add4(embedding[tok], posEncode(c))
+		time.Sleep(hopDelay)
+		sendVec(2, x0) // south, to row 1's attention stage
+		bilink.Screenf("gen %d: embedded %q", gen, wordAt(tok))
+	}
+
+	bilink.Screenf("embed done")
+	stop
+}
+
+// attnController runs at (1,0): the west end of the attention row.
+// It gets its own column's embedded vector straight from the north
+// link, gathers every other column's vector via the row's own
+// west/east relay chain (Example 21's relay idiom, generalized from
+// one int32 per round to a whole [dModel]float64 per round), runs
+// self-attention plus the first residual connection once the whole
+// row has arrived, scatters each column's own result back out along
+// the same relay chain, then forwards its own result south to row
+// 2 -- exactly what every other attention-row column does with
+// theirs.
+proc attnController(cols int) {
+	bilink.Screenf("attn controller ready, %d cols", cols)
+
+	for gen := 0; gen < generations; gen++ {
+		xs := make([][dModel]float64, cols)
+		xs[0] = recvVec(0) // from north
+
+		for r := cols - 1; r >= 1; r-- {
+			time.Sleep(hopDelay)
+			xs[r] = recvVec(1) // east
+		}
+
+		resid1 := runAttention(xs)
+
+		for s := 1; s < cols; s++ {
+			time.Sleep(hopDelay)
+			sendVec(1, resid1[s]) // east
+		}
+
+		time.Sleep(hopDelay)
+		sendVec(2, resid1[0]) // south, to row 2
+		bilink.Screenf("gen %d: attended", gen)
+	}
+
+	bilink.Screenf("attn controller done")
+	stop
+}
+
+// attnRelay runs on every other attention-row column. For gather
+// round r: if r is its own column it originates (its own vector,
+// already in hand from row 0); if r is further east it forwards
+// (receive east, forward west); otherwise that round isn't on its
+// path. Scatter mirrors this going back east. Once it has its own
+// final result it forwards that south to row 2. This is Example 21's
+// relay proc, generalized from one int32 per round to a whole
+// [dModel]float64 per round.
+proc attnRelay(cols int) {
+	c := bilink.Col()
+	bilink.Screenf("attn relay ready at col %d", c)
+
+	for gen := 0; gen < generations; gen++ {
+		myVec := recvVec(0) // from north
+
+		for r := cols - 1; r >= 1; r-- {
+			switch {
+			case r == c:
+				time.Sleep(hopDelay)
+				sendVec(3, myVec) // west
+			case r > c:
+				v := recvVec(1) // east
+				time.Sleep(hopDelay)
+				sendVec(3, v) // west
+			}
+		}
+
+		var mine [dModel]float64
+		for s := 1; s < cols; s++ {
+			switch {
+			case s == c:
+				mine = recvVec(3) // west
+			case s > c:
+				v := recvVec(3) // west
+				time.Sleep(hopDelay)
+				sendVec(1, v) // east
+			}
+		}
+
+		time.Sleep(hopDelay)
+		sendVec(2, mine) // south, to row 2
+		bilink.Screenf("gen %d: relayed", gen)
+	}
+
+	bilink.Screenf("attn relay done")
+	stop
+}
+
+// attnRowEnd runs at (1,cols-1): the east end of the attention row.
+// Source for exactly one gather round (its own column) and
+// destination for exactly one scatter round, then forwards its own
+// result south -- unlike attnRelay it needs no round loop at all.
+proc attnRowEnd(cols int) {
+	c := cols - 1
+	bilink.Screenf("attn row-end ready at col %d", c)
+
+	for gen := 0; gen < generations; gen++ {
+		myVec := recvVec(0) // from north
+		time.Sleep(hopDelay)
+		sendVec(3, myVec) // west
+
+		mine := recvVec(3) // west
+		time.Sleep(hopDelay)
+		sendVec(2, mine) // south, to row 2
+		bilink.Screenf("gen %d: row-end relayed", gen)
+	}
+
+	bilink.Screenf("attn row-end done")
+	stop
+}
+
+// ffnStage runs on every column of row 2: purely per-column work
+// again, like embedStage -- receive the attention stage's residual
+// output from north, run the feed-forward sub-layer plus its own
+// residual connection, hand the result south to row 3. No lateral
+// communication: every column of row 2 runs this fully in parallel
+// with every other column.
+proc ffnStage() {
+	c := bilink.Col()
+	bilink.Screenf("ffn ready at col %d", c)
+
+	for gen := 0; gen < generations; gen++ {
+		resid1 := recvVec(0) // from north
+		resid2 := add4(resid1, feedForward(resid1))
+		time.Sleep(hopDelay)
+		sendVec(2, resid2) // south, to row 3
+	}
+
+	bilink.Screenf("ffn done")
+	stop
+}
+
+// outputStage runs on every column of row 3, the pipeline's final
+// stage: receive the feed-forward stage's output from north, project
+// to vocabulary logits, argmax to a predicted token, done. The
+// prediction never needs to travel anywhere else, since embedStage
+// already knows (and logged) what token it started from.
+proc outputStage() {
+	c := bilink.Col()
+	bilink.Screenf("output ready at col %d", c)
+
+	for gen := 0; gen < generations; gen++ {
+		resid2 := recvVec(0) // from north
+		predicted := argmax4(outputLogits(resid2))
+		bilink.Screenf("gen %d: col %d -> %q", gen, c, wordAt(predicted))
+	}
+
+	bilink.Screenf("output done")
+	stop
+}
+
+// idle runs on every row at or beyond stageRows -- this demo's
+// pipeline is only 4 rows deep.
+proc idle() {
+	bilink.Screenf("idle -- beyond the pipeline's %d rows", stageRows)
+	stop
+}
+
+func main() {
+	r, cols := bilink.Row(), bilink.NumCols()
+
+	placed par {
+		processor(1, 0) {
+			attnController(cols)
+		}
+		processor(1, cols-1) {
+			attnRowEnd(cols)
+		}
+		default {
+			switch r {
+			case 0:
+				embedStage()
+			case 1:
+				attnRelay(cols)
+			case 2:
+				ffnStage()
+			case 3:
+				outputStage()
+			default:
+				idle()
+			}
+		}
+	}
+}

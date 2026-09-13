@@ -1,0 +1,20 @@
+package main
+
+proc controller() {
+	println("controller")
+}
+
+func main() {
+	placed par {
+		processor(0, 0) {
+			placed par {
+				processor(0) {
+					controller()
+				}
+			}
+		}
+		default {
+			controller()
+		}
+	}
+}

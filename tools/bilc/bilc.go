@@ -1240,6 +1240,34 @@ func (t *transformer) checkPlaceAliasNames() error {
 	return nil
 }
 
+// checkNoNestedPlacedPar rejects a placed par block that appears
+// anywhere inside another placed par block's braces. Nesting would be
+// meaningless: a processor(...) clause already gates on this node's
+// own identity down to exactly one node (or, for default, "every node
+// not otherwise matched") -- a further placed par inside it could only
+// ever re-test dispatch that's already been resolved, or express a
+// switch no single node could ever diverge on.
+func (t *transformer) checkNoNestedPlacedPar() error {
+	isHeader := func(i int) bool {
+		return t.toks[i].tok == token.IDENT && t.toks[i].lit == "placed" &&
+			i+2 < len(t.toks) &&
+			t.toks[i+1].tok == token.IDENT && t.toks[i+1].lit == "par" &&
+			t.toks[i+2].tok == token.LBRACE
+	}
+	for i := 0; i+2 < len(t.toks); i++ {
+		if !isHeader(i) {
+			continue
+		}
+		close := matchBrace(t.toks, i+2)
+		for j := i + 3; j < close; j++ {
+			if isHeader(j) {
+				return fmt.Errorf("%s: placed par may not be nested inside another placed par", t.file.Position(t.toks[j].pos))
+			}
+		}
+	}
+	return nil
+}
+
 // isPlaceAlias reports whether the identifier token at i is a resolvable
 // place-alias name, without needing the index it resolves to — used by
 // the reject-if-`link` guards in parseAltGuard and matchSwitchTypeGuard,
@@ -2445,6 +2473,9 @@ func Transform(filename string, src []byte) ([]byte, error) {
 		return nil, err
 	}
 	if err := t.checkPlaceAliasNames(); err != nil {
+		return nil, err
+	}
+	if err := t.checkNoNestedPlacedPar(); err != nil {
 		return nil, err
 	}
 	body := t.transform(0, len(t.toks)-1) // exclude EOF sentinel
