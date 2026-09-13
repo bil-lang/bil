@@ -30,12 +30,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// A `placed par`-using source also gets a companion topology
-	// manifest — see PlacementManifest's doc comment. Written next to the
-	// .go output, not the .bil source, since that's where the emulator's
-	// own regenerate-command convention (see ../../../emulator/README.md)
-	// already expects generated artifacts to live; nil for the common
-	// case of a program with no placement at all, so nothing is written.
 	manifest, err := bilc.PlacementManifest(os.Args[1], src)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "manifest error:", err)
@@ -46,6 +40,46 @@ func main() {
 		if err := os.WriteFile(manifestPath, manifest, 0o644); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
+		}
+	}
+
+	// Per-role standalone binaries and the host-facing deploy manifest --
+	// see this feature's plan (link-native boot cascade): a placed-par
+	// program also gets one complete, standalone Go source per distinct
+	// role under roles/<name>/main.go, plus roles/deploy.json describing
+	// every reachable leaf's clause match, if/else condition chain, and
+	// link-index binds for a host to resolve concrete role assignment at
+	// grid-launch time. Both are nil/empty for a file with no placed par
+	// at all, mirroring PlacementManifest's own convention.
+	roles, err := bilc.RoleBinaries(os.Args[1], src)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "role binaries error:", err)
+		os.Exit(1)
+	}
+	if len(roles) > 0 {
+		outDir := filepath.Dir(os.Args[2])
+		for name, code := range roles {
+			roleDir := filepath.Join(outDir, "roles", name)
+			if err := os.MkdirAll(roleDir, 0o755); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			if err := os.WriteFile(filepath.Join(roleDir, "main.go"), code, 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+		}
+
+		deploy, err := bilc.DeployManifest(os.Args[1], src)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "deploy manifest error:", err)
+			os.Exit(1)
+		}
+		if deploy != nil {
+			if err := os.WriteFile(filepath.Join(outDir, "roles", "deploy.json"), deploy, 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
 		}
 	}
 }

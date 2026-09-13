@@ -3,6 +3,7 @@ package bilc
 import (
 	"bytes"
 	"fmt"
+	"go/format"
 	"go/token"
 	"os"
 	"os/exec"
@@ -542,6 +543,183 @@ func main() {
 	m2, err := PlacementManifest("test.bil", noPlacement)
 	if err != nil {
 		t.Fatalf("PlacementManifest (no placed par): %v", err)
+	}
+	if m2 != nil {
+		t.Errorf("expected nil manifest for a file with no placed par block, got:\n%s", m2)
+	}
+}
+
+// TestRoleBinaries checks that RoleBinaries emits one standalone,
+// syntactically valid Go file per distinct placed-par role, each with
+// its own main() calling only that role's proc -- and that every
+// clause-match/leaf-condition expression is discard-referenced even in
+// a role (like idle, reached only via the if/else's else side) whose
+// own call never uses those identifiers, so Go doesn't reject r/cols as
+// "declared and not used" once the switch/if-else that used to
+// reference them is collapsed away.
+func TestRoleBinaries(t *testing.T) {
+	src := []byte(`package main
+
+proc controller(toEast chan<- int32) {
+	toEast <- 1
+}
+
+proc rowEnd(toWest chan<- int32) {
+	toWest <- 1
+}
+
+proc relay() {
+	println("relay")
+}
+
+proc idle() {
+	println("idle")
+}
+
+func main() {
+	r, cols := 0, 4
+	placed par {
+		processor(0, 0) {
+			place toEast at link[1]
+			controller(toEast)
+		}
+		processor(0, cols-1) {
+			place toWest at link[3]
+			rowEnd(toWest)
+		}
+		default {
+			if r == 0 {
+				relay()
+			} else {
+				idle()
+			}
+		}
+	}
+}
+`)
+	roles, err := RoleBinaries("test.bil", src)
+	if err != nil {
+		t.Fatalf("RoleBinaries: %v", err)
+	}
+	wantRoles := []string{"controller", "rowEnd", "relay", "idle"}
+	if len(roles) != len(wantRoles) {
+		t.Fatalf("expected %d roles, got %d: %v", len(wantRoles), len(roles), roles)
+	}
+	for _, name := range wantRoles {
+		code, ok := roles[name]
+		if !ok {
+			t.Fatalf("missing role %q among: %v", name, roles)
+		}
+		got := string(code)
+		if !strings.Contains(got, "func main() {") {
+			t.Errorf("role %q: expected a main() func, got:\n%s", name, got)
+		}
+		if !strings.Contains(got, name+"(") {
+			t.Errorf("role %q: expected main() to call %s(...), got:\n%s", name, name, got)
+		}
+		for _, discard := range []string{"_ = (0)", "_ = (cols - 1)", "_ = (r == 0)"} {
+			if !strings.Contains(got, discard) {
+				t.Errorf("role %q: expected %q to keep r/cols referenced, got:\n%s", name, discard, got)
+			}
+		}
+		if _, err := format.Source(code); err != nil {
+			t.Errorf("role %q: not valid Go: %v\n%s", name, err, got)
+		}
+	}
+
+	noPlacement := []byte(`package main
+
+func main() {
+	println("hello")
+}
+`)
+	roles2, err := RoleBinaries("test.bil", noPlacement)
+	if err != nil {
+		t.Fatalf("RoleBinaries (no placed par): %v", err)
+	}
+	if roles2 != nil {
+		t.Errorf("expected nil roles for a file with no placed par block, got: %v", roles2)
+	}
+}
+
+// TestDeployManifest checks the JSON deployment manifest's shape: each
+// leaf's clause match, its ordered if/else condition chain (with
+// negate set for the else side), the resolved proc, and its link-index
+// binds keyed by the callee's own declared parameter names.
+func TestDeployManifest(t *testing.T) {
+	src := []byte(`package main
+
+proc controller(toEast chan<- int32) {
+	toEast <- 1
+}
+
+proc rowEnd(toWest chan<- int32) {
+	toWest <- 1
+}
+
+proc relay() {
+	println("relay")
+}
+
+proc idle() {
+	println("idle")
+}
+
+func main() {
+	r, cols := 0, 4
+	placed par {
+		processor(0, 0) {
+			place toEast at link[1]
+			controller(toEast)
+		}
+		processor(0, cols-1) {
+			place toWest at link[3]
+			rowEnd(toWest)
+		}
+		default {
+			if r == 0 {
+				relay()
+			} else {
+				idle()
+			}
+		}
+	}
+}
+`)
+	m, err := DeployManifest("test.bil", src)
+	if err != nil {
+		t.Fatalf("DeployManifest: %v", err)
+	}
+	got := string(m)
+	for _, want := range []string{
+		`"row": "0"`,
+		`"col": "0"`,
+		`"proc": "controller"`,
+		`"toEast": "1"`,
+		`"col": "cols-1"`,
+		`"proc": "rowEnd"`,
+		`"toWest": "3"`,
+		`"default": true`,
+		`"expr": "r == 0"`,
+		`"negate": false`,
+		`"negate": true`,
+		`"proc": "relay"`,
+		`"proc": "idle"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in deploy manifest, got:\n%s", want, got)
+		}
+	}
+
+	noPlacement := []byte(`package main
+
+func main() {
+	println("hello")
+}
+`)
+	m2, err := DeployManifest("test.bil", noPlacement)
+	if err != nil {
+		t.Fatalf("DeployManifest (no placed par): %v", err)
 	}
 	if m2 != nil {
 		t.Errorf("expected nil manifest for a file with no placed par block, got:\n%s", m2)

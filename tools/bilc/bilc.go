@@ -5,6 +5,7 @@ package bilc
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"go/format"
 	"go/scanner"
@@ -241,6 +242,19 @@ type transformer struct {
 	// emitPlacedCallLeaf both need to look up a placed-called proc's own
 	// parameter list and body range by name.
 	funcBodyByName map[string]funcBodyRange
+
+	// roleOverride, when non-empty, changes what a `placed par` block
+	// compiles to: instead of the full multi-role switch, just a single
+	// hardcoded call to whichever placed-callable proc is named here (see
+	// emitPlacedParClauses). Used by RoleBinaries to produce one
+	// standalone-per-role variant of the whole file at a time, rather than
+	// needing its own separate emission path with its own import/constant
+	// dependency tracking -- every other top-level declaration (consts,
+	// other procs, imports) is still emitted exactly as Transform already
+	// would, and Go's own linker drops whatever isn't reachable from the
+	// one role's call in main(), the same dead-code elimination that
+	// today's single switch statement (referencing every role) prevents.
+	roleOverride string
 }
 
 // placeAliasScope is one proc/func body's `place`-alias table: NAME ->
@@ -1963,6 +1977,48 @@ func (t *transformer) parsePlacedParClauses(lo, hi int) (clauses []placedClause,
 // a token Go's automatic semicolon insertion fires after (like `)`)
 // silently breaks the emitted Go, whereas `{`/`:` are never such tokens.
 func (t *transformer) emitPlacedParClauses(out *bytes.Buffer, lo, hi int) {
+	if t.roleOverride != "" {
+		clauses, _ := t.parsePlacedParClauses(lo, hi) // already validated; best-effort here
+		leaves, err := t.collectResolvedLeaves(lo, hi)
+		if err != nil {
+			panic(err)
+		}
+		var target *resolvedLeaf
+		for i := range leaves {
+			if leaves[i].callee == t.roleOverride {
+				target = &leaves[i]
+				break
+			}
+		}
+		if target == nil {
+			panic(fmt.Sprintf("role %q not found in this file's placed-par block", t.roleOverride))
+		}
+		// Collapsing the switch/if-else down to one leaf's bare call
+		// drops every reference to whatever the *other* clauses'
+		// matches and conditions used to compare against -- often a
+		// local var computed just before the placed-par block (e.g.
+		// `r, cols := bilink.Row(), bilink.NumCols()`). Go requires
+		// every declared local to be referenced somewhere, so
+		// discard-reference each clause-match and leaf-condition
+		// expression's own source text (already known-good, since
+		// it's exactly what used to appear in a case/if condition)
+		// before emitting the one call that actually runs.
+		for _, cl := range clauses {
+			switch {
+			case cl.idExpr != "":
+				fmt.Fprintf(out, "_ = (%s)\n", cl.idExpr)
+			case cl.rowExpr != "":
+				fmt.Fprintf(out, "_ = (%s)\n_ = (%s)\n", cl.rowExpr, cl.colExpr)
+			}
+		}
+		for _, leaf := range leaves {
+			for _, c := range leaf.conditions {
+				fmt.Fprintf(out, "_ = (%s)\n", c.exprSrc)
+			}
+		}
+		t.emitPlacedCallLeaf(out, target.leafLo, target.leafHi)
+		return
+	}
 	clauses, ok := t.parsePlacedParClauses(lo, hi)
 	if !ok {
 		panic(fmt.Sprintf("unsupported placed-par shape at %q (%v)", t.toks[lo].lit, t.toks[lo].tok))
@@ -2049,6 +2105,122 @@ func (t *transformer) emitPlacedCallLeaf(out *bytes.Buffer, lo, hi int) {
 		}
 	}
 	out.WriteString(")")
+}
+
+// leafCondition is one if/else branch taken to reach a placed-par leaf,
+// in source order. exprSrc is the condition's own raw source text
+// (matching how placedClause's own rowExpr/colExpr already capture
+// expressions as text rather than a parsed AST) rather than any bilc
+// internal representation, since the only consumer is a host runtime
+// outside this file entirely (see DeployManifest) -- negate is true
+// when this leaf is reached via that condition's `else` side.
+type leafCondition struct {
+	exprSrc string
+	negate  bool
+}
+
+// resolvedLeaf is one fully-resolved placed-par leaf: which top-level
+// clause it belongs to, the chain of if/else conditions (if any) taken
+// to reach it from that clause's own body, which proc it calls, and
+// that call's link-index bindings keyed by the callee's own declared
+// parameter names (matching placeAliasScope's convention, not the call
+// site's local place-decl names). Collected by collectResolvedLeaves
+// for two independent consumers: RoleBinaries (which additionally needs
+// each leaf's own [lo,hi) token range, to reuse emitPlacedCallLeaf
+// verbatim) and DeployManifest (which needs everything else, so a host
+// can resolve concrete role assignment at grid-launch time without
+// needing bilc's own parser).
+type resolvedLeaf struct {
+	clause         placedClause
+	conditions     []leafCondition
+	leafLo, leafHi int
+	callee         string
+	binds          map[string]string
+}
+
+// findPlacedParBlock returns the token range of a file's first `placed
+// par { ... }` block: lo,hi bound its interior, matching
+// parsePlacedParClauses's own convention. found is false for a file
+// with no placed par at all. (v1 doesn't support more than one such
+// block per file in practice -- see PlacementManifest's own doc comment
+// -- so "first" and "only" coincide for every real file today.)
+func (t *transformer) findPlacedParBlock() (lo, hi int, found bool) {
+	for i := 0; i+2 < len(t.toks); i++ {
+		if t.toks[i].tok == token.IDENT && t.toks[i].lit == "placed" &&
+			t.toks[i+1].tok == token.IDENT && t.toks[i+1].lit == "par" &&
+			t.toks[i+2].tok == token.LBRACE {
+			close := matchBrace(t.toks, i+2)
+			return i + 3, close, true
+		}
+	}
+	return 0, 0, false
+}
+
+// collectResolvedLeaves walks a `placed par { ... }` block's clauses --
+// [lo,hi) is the block's interior, matching parsePlacedParClauses's own
+// convention -- recursing through any if/else leaf dispatch exactly
+// like collectPlacedCallSites's own walk (parseIfElseBranches down to
+// parsePlacedCallLeaf), but collecting a resolvedLeaf per reachable leaf
+// instead of only validating. Assumes collectPlacedCallSites has
+// already validated the whole file (called earlier by every caller of
+// this function), so shapes are trusted here rather than re-checked;
+// callee/parameter lookups mirror collectPlacedCallSites's own alias
+// resolution exactly.
+func (t *transformer) collectResolvedLeaves(lo, hi int) ([]resolvedLeaf, error) {
+	clauses, ok := t.parsePlacedParClauses(lo, hi)
+	if !ok {
+		return nil, fmt.Errorf("%s: unsupported placed-par shape", t.file.Position(t.toks[lo].pos))
+	}
+
+	var leaves []resolvedLeaf
+	var walk func(cl placedClause, conds []leafCondition, lo, hi int) error
+	walk = func(cl placedClause, conds []leafCondition, lo, hi int) error {
+		for lo < hi && t.toks[lo].tok == token.SEMICOLON {
+			lo++
+		}
+		if condLo, condHi, thenLo, thenHi, elseLo, elseHi, _, ok := t.parseIfElseBranches(lo, hi); ok {
+			exprSrc := strings.TrimSpace(string(t.src[t.off(t.toks[condLo].pos):t.off(t.toks[condHi].pos)]))
+			thenConds := append(append([]leafCondition{}, conds...), leafCondition{exprSrc: exprSrc, negate: false})
+			if err := walk(cl, thenConds, thenLo, thenHi); err != nil {
+				return err
+			}
+			elseConds := append(append([]leafCondition{}, conds...), leafCondition{exprSrc: exprSrc, negate: true})
+			return walk(cl, elseConds, elseLo, elseHi)
+		}
+
+		callee, _, argRanges, placeDecls, ok := t.parsePlacedCallLeaf(lo, hi)
+		if !ok {
+			return fmt.Errorf("%s: unsupported placed-par clause body shape", t.file.Position(t.toks[lo].pos))
+		}
+		br, found := t.funcBodyByName[callee]
+		if !found {
+			return fmt.Errorf("placed par calls undeclared proc %q", callee)
+		}
+		names, dirs := t.paramNamesAndDirections(br.paramsLo, br.paramsHi)
+		placeByName := make(map[string]placeDeclBinding, len(placeDecls))
+		for _, pd := range placeDecls {
+			placeByName[pd.name] = pd
+		}
+		binds := map[string]string{}
+		for idx, arg := range argRanges {
+			if idx >= len(names) || dirs[idx] == dirNone {
+				continue
+			}
+			argSrc := strings.TrimSpace(string(t.src[t.off(t.toks[arg[0]].pos):t.off(t.toks[arg[1]].pos)]))
+			if pd, ok := placeByName[argSrc]; ok {
+				binds[names[idx]] = pd.idxExpr
+			}
+		}
+		leaves = append(leaves, resolvedLeaf{clause: cl, conditions: conds, leafLo: lo, leafHi: hi, callee: callee, binds: binds})
+		return nil
+	}
+
+	for _, cl := range clauses {
+		if err := walk(cl, nil, cl.bodyLo, cl.bodyHi); err != nil {
+			return nil, err
+		}
+	}
+	return leaves, nil
 }
 
 // emitAltClauses parses every clause of an `alt { ... }` block ([lo,hi) is
@@ -2838,7 +3010,126 @@ func PlacementManifest(filename string, src []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// DeployManifest builds the JSON deployment manifest a host needs to
+// resolve concrete per-node role assignment at grid-launch time --
+// distinct from PlacementManifest's `.topology.yaml` (a deliberately
+// incomplete, human-readable summary of structure): this one is a
+// complete, mechanical description of every reachable placed-par leaf,
+// meant only for a program to consume, never a person to read. Each
+// leaf records: which top-level clause it belongs to (an id, a row/col
+// pair, or the default clause), the ordered chain of if/else conditions
+// (as raw source text, e.g. "r == 0", plus whether this leaf is that
+// condition's else-side) needed to reach it, which proc it calls, and
+// that call's own link-index bindings keyed by the callee's declared
+// parameter names. A host evaluates each condition against a launch's
+// real row/col/rows/cols with its own small expression evaluator (never
+// bilc's own -- only the host ever knows a launch's concrete grid
+// size). Returns (nil, nil) for a file with no placed par at all.
+func DeployManifest(filename string, src []byte) ([]byte, error) {
+	if abs, err := filepath.Abs(filename); err == nil {
+		filename = abs
+	}
+	t := tokenize(filename, src)
+	t.buildFuncBodyIndex()
+	if err := t.collectPlacedCallSites(); err != nil {
+		return nil, err
+	}
+	lo, hi, found := t.findPlacedParBlock()
+	if !found {
+		return nil, nil
+	}
+	leaves, err := t.collectResolvedLeaves(lo, hi)
+	if err != nil {
+		return nil, err
+	}
+
+	type jsonMatch struct {
+		ID      string `json:"id,omitempty"`
+		Row     string `json:"row,omitempty"`
+		Col     string `json:"col,omitempty"`
+		Default bool   `json:"default,omitempty"`
+	}
+	type jsonCondition struct {
+		Expr   string `json:"expr"`
+		Negate bool   `json:"negate"`
+	}
+	type jsonLeaf struct {
+		Match      jsonMatch         `json:"match"`
+		Conditions []jsonCondition   `json:"conditions,omitempty"`
+		Proc       string            `json:"proc"`
+		Binds      map[string]string `json:"binds,omitempty"`
+	}
+
+	out := make([]jsonLeaf, 0, len(leaves))
+	for _, leaf := range leaves {
+		m := jsonMatch{}
+		switch {
+		case leaf.clause.isDefault:
+			m.Default = true
+		case leaf.clause.idExpr != "":
+			m.ID = leaf.clause.idExpr
+		default:
+			m.Row, m.Col = leaf.clause.rowExpr, leaf.clause.colExpr
+		}
+		conds := make([]jsonCondition, 0, len(leaf.conditions))
+		for _, c := range leaf.conditions {
+			conds = append(conds, jsonCondition{Expr: c.exprSrc, Negate: c.negate})
+		}
+		out = append(out, jsonLeaf{Match: m, Conditions: conds, Proc: leaf.callee, Binds: leaf.binds})
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
 func Transform(filename string, src []byte) ([]byte, error) {
+	return transformSource(filename, src, "")
+}
+
+// RoleBinaries compiles filename's source once per distinct placed-par
+// role (see resolvedLeaf/collectResolvedLeaves), returning each role's
+// own complete, standalone Go source keyed by role/proc name --
+// everything Transform would emit for the whole file, except main()'s
+// placed-par block compiles to just that one role's call instead of the
+// full dispatch switch (see roleOverride's own doc comment for why
+// including every other top-level declaration unconditionally, and
+// relying on Go's own linker to drop what isn't reachable, is both
+// simpler and more robust than bilc slicing out one role's own
+// dependency closure by hand). Returns (nil, nil) for a file with no
+// placed par at all, mirroring PlacementManifest's own convention.
+func RoleBinaries(filename string, src []byte) (map[string][]byte, error) {
+	if abs, err := filepath.Abs(filename); err == nil {
+		filename = abs
+	}
+	probe := tokenize(filename, src)
+	probe.buildFuncBodyIndex()
+	if err := probe.collectPlacedCallSites(); err != nil {
+		return nil, err
+	}
+	lo, hi, found := probe.findPlacedParBlock()
+	if !found {
+		return nil, nil
+	}
+	leaves, err := probe.collectResolvedLeaves(lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	roles := map[string][]byte{}
+	for _, leaf := range leaves {
+		if _, done := roles[leaf.callee]; done {
+			continue
+		}
+		out, err := transformSource(filename, src, leaf.callee)
+		if err != nil {
+			return nil, err
+		}
+		roles[leaf.callee] = out
+	}
+	return roles, nil
+}
+
+// transformSource is Transform's real implementation, parametrized by
+// roleOverride (see the transformer field of the same name) -- Transform
+// itself is just this with roleOverride == "".
+func transformSource(filename string, src []byte, roleOverride string) ([]byte, error) {
 	// Absolute, not whatever filename came in as: the `//line` directives
 	// resync writes (see resync) end up in a Go file that go/parser reads
 	// from a different directory entirely (bil run's os.CreateTemp lands
@@ -2854,6 +3145,7 @@ func Transform(filename string, src []byte) ([]byte, error) {
 		filename = abs
 	}
 	t := tokenize(filename, src)
+	t.roleOverride = roleOverride
 	t.buildFuncBodyIndex()
 	for _, tk := range t.toks {
 		if tk.tok == token.IDENT && tk.lit == "altN" {
