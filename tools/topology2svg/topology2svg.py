@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
-"""Render a bilc `.topology.yaml` placement manifest as an SVG diagram.
+"""Render a bilc `roles/deploy.json` deployment manifest as an SVG diagram.
 
-The manifest format is the small, fixed schema `PlacementManifest` in
-tools/bilc/bilc.go emits (see docs/guide.md, "What bilc does with
-placement") -- a `placements:` list of `{match: {...}}` / `proc:` pairs,
-an optional `default:` clause, and a `links: aliases:` map of per-proc
-link-index names. It is not general YAML (no nesting beyond one flow
-map, no comments, no multi-line scalars), so this parses that exact
-shape by hand rather than depending on PyYAML.
+`deploy.json` (`DeployManifest` in tools/bilc/bilc.go; see docs/guide.md,
+"What bilc does with placement") is the *only* placement manifest bilc
+produces -- a JSON list of leaves, each with a clause match (an id, a
+row/col pair -- either slot possibly the literal wildcard string "*" --
+or the fully-wild default), an ordered chain of if/else conditions (raw
+Go/Bil boolean-expression source text), the proc it resolves to, and
+that call's link-index binds. It's mechanical and complete by design
+(a host needs a concrete answer for every node), so this tool, like a
+host, resolves every cell by walking the leaves in order and evaluating
+each one's match plus condition chain -- first leaf that matches wins,
+mirroring switch/if-else "first match wins" semantics and the
+`resolveRole`/`evalExpr` functions in ../../emulator/static/index.html,
+which this deliberately stays in lockstep with (same tiny expression
+grammar: identifiers, int literals, ==, !=, &&, +, -, and the same "*"
+wildcard-dimension convention) so the diagram always matches what the
+real boot cascade would actually run.
 
-Grid placements use `row`/`col` (possibly symbolic, e.g. "cols-1",
-since bilc never knows the concrete grid size); flat placements use
-`id`. Since the manifest never records a concrete grid/id-space size,
---rows/--cols/--ids pick an illustrative size to render.
+Since deploy.json never records a concrete grid/id-space size (bilc
+never knows one at compile time), --rows/--cols/--ids pick an
+illustrative size to render.
 """
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -28,85 +37,127 @@ PALETTE = ["#E69F00", "#56B4E9", "#009E73", "#F0E442",
 DEFAULT_FILL = "#EDEDED"
 DEFAULT_STROKE = "#888888"
 
+WILDCARD = "*"
 
-def parse_scalar(v):
-    v = v.strip()
-    if v.startswith('"') and v.endswith('"'):
-        return v[1:-1]
-    try:
-        return int(v)
-    except ValueError:
+
+class EvalError(ValueError):
+    pass
+
+
+def eval_expr(src, env):
+    """Evaluate one deploy.json expression against env (r/c/rows/cols).
+
+    Hand-rolled, not eval()/Function()-based, deliberately: this mirrors
+    evalExpr in ../../emulator/static/index.html exactly (identifiers,
+    int literals, ==, !=, &&, +, -) rather than accepting arbitrary
+    Python syntax, so this tool's notion of "what deploy.json expressions
+    mean" can never drift ahead of what the real host actually implements.
+    """
+    i = 0
+    n = len(src)
+
+    def skip_ws():
+        nonlocal i
+        while i < n and src[i].isspace():
+            i += 1
+
+    def consume(tok):
+        nonlocal i
+        skip_ws()
+        if src.startswith(tok, i):
+            i += len(tok)
+            return True
+        return False
+
+    def parse_primary():
+        nonlocal i
+        skip_ws()
+        if consume("("):
+            v = parse_and()
+            if not consume(")"):
+                raise EvalError(f"expected ) in {src!r}")
+            return v
+        m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", src[i:])
+        if m:
+            i += len(m.group(0))
+            if m.group(0) not in env:
+                raise EvalError(f"unknown identifier {m.group(0)!r} in {src!r}")
+            return env[m.group(0)]
+        m = re.match(r"[0-9]+", src[i:])
+        if m:
+            i += len(m.group(0))
+            return int(m.group(0))
+        raise EvalError(f"unexpected token at {i} in {src!r}")
+
+    def parse_add():
+        v = parse_primary()
+        while True:
+            if consume("+"):
+                v = v + parse_primary()
+            elif consume("-"):
+                v = v - parse_primary()
+            else:
+                return v
+
+    def parse_cmp():
+        v = parse_add()
+        if consume("=="):
+            return v == parse_add()
+        if consume("!="):
+            return v != parse_add()
         return v
 
+    def parse_and():
+        v = parse_cmp()
+        while consume("&&"):
+            rhs = parse_cmp()  # always parse, to advance i past a false lhs too
+            v = bool(v) and bool(rhs)
+        return v
 
-def parse_flow_map(s):
-    s = s.strip()
-    if not s.startswith("{") or not s.endswith("}"):
-        raise ValueError(f"expected a flow map, got: {s!r}")
-    inner = s[1:-1].strip()
-    out = {}
-    if not inner:
-        return out
-    for part in inner.split(","):
-        key, _, val = part.partition(":")
-        out[key.strip()] = parse_scalar(val)
-    return out
+    result = parse_and()
+    skip_ws()
+    if i != n:
+        raise EvalError(f"trailing input in {src!r}")
+    return result
 
 
-def parse_manifest(text):
-    lines = text.splitlines()
-    i, n = 0, len(lines)
-    placements = []
-    has_default, default_proc = False, None
-    aliases = {}
+def leaf_clause_matches(leaf, r, c, env):
+    """Whether leaf's own `match` (ignoring its condition chain) applies
+    at (r, c) -- a wildcarded slot ("*") always matches that dimension.
+    """
+    m = leaf["match"]
+    if m.get("default"):
+        return True
+    if "id" in m:
+        return eval_expr(m["id"], env) == r * env["cols"] + c
+    row_ok = m.get("row") == WILDCARD or eval_expr(m["row"], env) == r
+    col_ok = m.get("col") == WILDCARD or eval_expr(m["col"], env) == c
+    return row_ok and col_ok
 
-    while i < n:
-        line = lines[i]
-        if not line.strip():
-            i += 1
+
+def resolve_role(leaves, r, c, rows, cols):
+    """Mirrors index.html's resolveRole: first leaf whose clause match
+    and if/else condition chain both hold wins.
+    """
+    env = {"r": r, "c": c, "rows": rows, "cols": cols}
+    for leaf in leaves:
+        if not leaf_clause_matches(leaf, r, c, env):
             continue
-        if line == "placements:":
-            i += 1
-            while i < n and lines[i].startswith("  - match: "):
-                match = parse_flow_map(lines[i][len("  - match: "):])
-                i += 1
-                proc = None
-                if i < n and lines[i].startswith("    proc: "):
-                    proc = lines[i][len("    proc: "):].strip()
-                    i += 1
-                placements.append({"match": match, "proc": proc})
-            continue
-        if line == "default:":
-            has_default = True
-            i += 1
-            if i < n and lines[i].startswith("  proc: "):
-                default_proc = lines[i][len("  proc: "):].strip()
-                i += 1
-            continue
-        if line == "links:":
-            i += 1
-            if i < n and lines[i].strip() == "aliases:":
-                i += 1
-                while i < n and lines[i].startswith("    ") and ":" in lines[i]:
-                    name, _, rest = lines[i].strip().partition(":")
-                    aliases[name.strip()] = parse_flow_map(rest.strip())
-                    i += 1
-            continue
-        i += 1  # unrecognised line -- ignore rather than fail
-
-    return placements, has_default, default_proc, aliases
+        ok = True
+        for cond in leaf.get("conditions", []):
+            v = bool(eval_expr(cond["expr"], env))
+            if cond.get("negate"):
+                v = not v
+            if not v:
+                ok = False
+                break
+        if ok:
+            return leaf["proc"]
+    return None
 
 
-def eval_expr(expr, rows, cols):
-    """Resolve an int, or a bilc-style symbolic 'rows'/'cols' [+-N] expr."""
-    if isinstance(expr, int):
-        return expr
-    m = re.match(r'^(rows|cols)\s*([+\-]\s*\d+)?$', str(expr))
-    if not m:
-        return None
-    base = rows if m.group(1) == "rows" else cols
-    delta = m.group(2)
-    return base + int(delta.replace(" ", "")) if delta else base
+def is_grid_manifest(leaves):
+    return not any("id" in leaf["match"] for leaf in leaves)
 
 
 def proc_color(name, colors):
@@ -143,41 +194,36 @@ def outward_point(cx, cy, direction, dist):
     return ex + dx * dist, ey + dy * dist
 
 
-def render_svg(placements, has_default, default_proc, aliases, rows, cols, ids, title):
-    grid_mode = not any("id" in p["match"] for p in placements)
+def leaf_binds_by_proc(leaves):
+    """First leaf's `binds` for each distinct proc -- every leaf that
+    resolves to the same proc shares the same channel/link wiring (the
+    proc's own declared parameters never change), so the first one seen
+    is as good as any for drawing that proc's link arrows.
+    """
+    out = {}
+    for leaf in leaves:
+        proc = leaf["proc"]
+        if proc not in out and leaf.get("binds"):
+            out[proc] = leaf["binds"]
+    return out
+
+
+def render_svg(leaves, rows, cols, ids, title):
+    grid_mode = is_grid_manifest(leaves)
     colors = {}
-    cells = []  # (label, r_or_index, c, proc, is_default_fill)
-
-    def resolve_grid(r, c):
-        for p in placements:
-            m = p["match"]
-            if "id" in m:
-                continue
-            row_ok = "row" not in m or eval_expr(m["row"], rows, cols) == r
-            col_ok = "col" not in m or eval_expr(m["col"], rows, cols) == c
-            if row_ok and col_ok:
-                return p["proc"], True
-        return default_proc, False
-
-    def resolve_id(node_id):
-        for p in placements:
-            m = p["match"]
-            if "id" not in m:
-                continue
-            if eval_expr(m["id"], rows, cols) == node_id:
-                return p["proc"], True
-        return default_proc, False
+    cells = []
+    binds = leaf_binds_by_proc(leaves)
 
     if grid_mode:
         for r in range(rows):
             for c in range(cols):
-                proc, explicit = resolve_grid(r, c)
-                cells.append({"r": r, "c": c, "proc": proc, "explicit": explicit})
+                proc = resolve_role(leaves, r, c, rows, cols)
+                cells.append({"r": r, "c": c, "proc": proc})
         grid_w, grid_h = cols, rows
     else:
         for node_id in range(ids):
-            proc, explicit = resolve_id(node_id)
-            cells.append({"r": 0, "c": node_id, "proc": proc, "explicit": explicit})
+            proc = resolve_role(leaves, 0, node_id, ids, ids)
+            cells.append({"r": 0, "c": node_id, "proc": proc})
         grid_w, grid_h = ids, 1
 
     width = MARGIN * 2 + grid_w * CELL_W + (grid_w - 1) * GAP
@@ -205,23 +251,22 @@ def render_svg(placements, has_default, default_proc, aliases, rows, cols, ids, 
     for cell in cells:
         x, y = cell_xy(cell["r"], cell["c"])
         proc = cell["proc"]
-        label = proc if proc else ("default" if not cell["explicit"] and has_default else "—")
+        label = proc if proc else "—"
         fill = proc_color(proc, colors) if proc else DEFAULT_FILL
-        dash = '' if cell["explicit"] else ' stroke-dasharray="6,4"'
         text_fill = "#ffffff" if proc else "#666666"
         svg.append(f'<rect x="{x}" y="{y}" width="{CELL_W}" height="{CELL_H}" rx="10" '
                     f'fill="{fill}" fill-opacity="{"0.9" if proc else "1"}" '
-                    f'stroke="{DEFAULT_STROKE}"{dash} stroke-width="1.5"/>')
+                    f'stroke="{DEFAULT_STROKE}" stroke-width="1.5"/>')
         corner = f'row {cell["r"]}, col {cell["c"]}' if grid_mode else f'id {cell["c"]}'
         svg.append(f'<text x="{x + CELL_W/2}" y="{y + CELL_H/2 - 4}" text-anchor="middle" '
                     f'font-size="15" font-weight="600" fill="{text_fill}">{escape(label)}</text>')
         svg.append(f'<text x="{x + CELL_W/2}" y="{y + CELL_H/2 + 16}" text-anchor="middle" '
                     f'font-size="10" fill="{text_fill}" opacity="0.85">{escape(corner)}</text>')
 
-        if proc and proc in aliases and grid_mode:
+        if proc and proc in binds and grid_mode:
             cx, cy = x + CELL_W / 2, y + CELL_H / 2
             by_direction = {}
-            for alias_name, idx in aliases[proc].items():
+            for alias_name, idx in binds[proc].items():
                 d, kind = alias_direction(alias_name)
                 if d is None:
                     continue
@@ -241,9 +286,8 @@ def render_svg(placements, has_default, default_proc, aliases, rows, cols, ids, 
                     svg.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
                                 f'stroke="#333"{dasharray} stroke-width="1.5"{marker}/>')
                     lx, ly = ox + perp_x, oy + perp_y
-                    anchor = "middle"
                     dy = {"north": -8, "south": 16, "east": -8, "west": -8}[d]
-                    svg.append(f'<text x="{lx:.1f}" y="{ly + dy:.1f}" text-anchor="{anchor}" '
+                    svg.append(f'<text x="{lx:.1f}" y="{ly + dy:.1f}" text-anchor="middle" '
                                 f'font-size="10" fill="#333">{escape(alias_name)}:{idx}</text>')
 
     # Legend.
@@ -267,29 +311,36 @@ def escape(s):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("manifest", type=Path, help="path to a *.topology.yaml file")
+    ap.add_argument("manifest", type=Path, help="path to a roles/deploy.json file")
     ap.add_argument("-o", "--out", type=Path, help="output .svg path (default: alongside input)")
     ap.add_argument("--rows", type=int, default=1, help="rows to render for a row/col grid (default: 1, auto-grown to fit explicit row matches)")
     ap.add_argument("--cols", type=int, default=6, help="cols to render for a row/col grid (default: 6)")
     ap.add_argument("--ids", type=int, default=6, help="node count to render for an id-based layout (default: 6)")
     args = ap.parse_args()
 
-    text = args.manifest.read_text()
-    placements, has_default, default_proc, aliases = parse_manifest(text)
-    if not placements and not has_default:
-        sys.exit(f"error: no placements found in {args.manifest}")
+    manifest = json.loads(args.manifest.read_text())
+    leaves = manifest.get("leaves", [])
+    if not leaves:
+        sys.exit(f"error: no leaves found in {args.manifest}")
 
     rows = args.rows
     cols = args.cols
-    for p in placements:
-        m = p["match"]
-        if isinstance(m.get("row"), int):
-            rows = max(rows, m["row"] + 1)
-        if isinstance(m.get("col"), int):
-            cols = max(cols, m["col"] + 1)
+    for leaf in leaves:
+        m = leaf["match"]
+        if isinstance(m.get("row"), str) and m["row"] != WILDCARD and m["row"].lstrip("-").isdigit():
+            rows = max(rows, int(m["row"]) + 1)
+        if isinstance(m.get("col"), str) and m["col"] != WILDCARD and m["col"].lstrip("-").isdigit():
+            cols = max(cols, int(m["col"]) + 1)
 
-    svg = render_svg(placements, has_default, default_proc, aliases,
-                      rows, cols, args.ids, title=args.manifest.name)
+    # deploy.json always lives at nodeprog/<demo>/roles/deploy.json -- the
+    # demo name one level up is a far more useful title than "roles".
+    parent = args.manifest.parent
+    title = parent.parent.name if parent.name == "roles" and parent.parent.name else parent.name or args.manifest.name
+
+    try:
+        svg = render_svg(leaves, rows, cols, args.ids, title=title)
+    except EvalError as e:
+        sys.exit(f"error: {e}")
 
     out = args.out or args.manifest.with_suffix(".svg")
     out.write_text(svg)

@@ -1,3 +1,80 @@
+### What bilc does with placement
+
+A `.bil` source file expresses placement with two constructs: a `placed par { processor(...) {...} ... default {...} }` block naming which role runs where, and `place NAME at link[EXPR]` statements in the calling clause binding one of that role's own declared channel parameters to a physical link. bilc's action on these is two rewrites plus two generated artifacts.
+
+**Rewrite 1 — `placed par` becomes a runtime switch.** Each `processor(id)` clause becomes `case bilink.ID() == id:`; each `processor(r, c)` clause becomes `case bilink.Row() == r && bilink.Col() == c:`. Either slot of the two-arg form may instead be a literal `*` wildcard: `processor(1, *)` matches every column of row 1 and compiles to just `case bilink.Row() == 1:` (only the pinned dimension is compared); `processor(*, 0)` matches every row's column 0 and compiles to `case bilink.Col() == 0:`. A clause that wildcards both dimensions — `processor(*)`, `processor(*, *)`, or a bare `default` — matches every node and compiles to Go's own `default:`, and, like an ordinary `default`, must be the block's last clause, since nothing after it could ever be reached. The result is one ordinary `switch {}` in the compiled program — never a `par(...)`, never goroutines. Every node's Worker runs the exact same compiled program; which branch a given node takes depends entirely on `bilink.Row()/Col()/ID()`.
+
+**Rewrite 2 — `place NAME at link[EXPR]` becomes nothing at all.** It's compile-time-only, and it lives at the *call site*, not inside the called proc's own body: a proc declares ordinary directional Go channel parameters (`toEast chan<- int32`), and the `processor(...)`/`default` clause that calls it writes `place toEast at link[1]; controller(toEast)` to bind that parameter. Every reference to `toEast` inside `controller`'s own body is rewritten straight to the equivalent `bilink.Send`/`Recv` call on link 1 — the Go channel value is never actually touched — so the call site itself passes a bare `nil` for that argument (`controller(nil)`), just enough to satisfy Go's own type-checker.
+
+**Artifact 1 — one standalone Go source per role.** `RoleBinaries` emits `roles/<name>/main.go` for every distinct proc a `placed par` block calls — the whole file, unchanged, except the placed-par block compiles to a single hardcoded call to just that one role instead of the switch. Every other declaration is still emitted exactly as normal; Go's own linker, not bilc, drops whatever isn't reachable from that one call. (Measured directly: this barely shrinks the compiled `.wasm` — Go's own runtime dominates the binary, not the role code — so its real value is letting a host fetch each distinct role once instead of redundantly re-fetching one shared binary per node; see `../emulator/README.md`'s "Host and boot cascade".)
+
+**Artifact 2 — `roles/deploy.json`, a manifest for a host, not a person.** The only manifest bilc produces (an earlier, deliberately incomplete `.topology.yaml` sibling was dropped as redundant with this one — see `tools/topology2svg`, which now renders straight from `deploy.json` instead). It's complete and mechanical: every reachable leaf (each `if`/`else` branch inside a clause, resolved down to its own bare call), with that leaf's clause match, its ordered chain of `if`/`else` conditions (as raw source text, plus whether it's the else-side), the proc it calls, and that call's link-index binds. A wildcarded dimension appears as the literal string `"*"` — a host just skips comparing that one dimension, needing no expression evaluator for it at all; a clause that wildcards both (or a bare `default`) is reported as `"default": true` instead, never as `row`/`col` both `"*"`.
+
+Here's the real, current placement block from `examples/22-pipeline-transformer.bil` — every clause here uses a wildcard:
+
+```bil
+placed par {
+    processor(1, 0) {
+        place eastOut at link[1]
+        place eastIn at link[1]
+        attnController(eastOut, eastIn)
+    }
+    processor(1, cols-1) {
+        place north at link[0]
+        place westOut at link[3]
+        place westIn at link[3]
+        place south at link[2]
+        attnRowEnd(north, westOut, westIn, south)
+    }
+    processor(0, *) {
+        place south at link[2]
+        embedStage(south)
+    }
+    processor(1, *) {
+        place north at link[0]
+        place eastIn at link[1]
+        place westOut at link[3]
+        place westIn at link[3]
+        place eastOut at link[1]
+        place south at link[2]
+        attnRelay(north, eastIn, westOut, westIn, eastOut, south)
+    }
+    processor(2, *) {
+        place north at link[0]
+        place south at link[2]
+        ffnStage(north, south)
+    }
+    processor(3, *) {
+        place north at link[0]
+        outputStage(north)
+    }
+    processor(*, *) {
+        idle()
+    }
+}
+```
+
+...and `roles/deploy.json`, the manifest bilc produces from it (truncated to two leaves — every entry follows the same shape):
+
+```json
+{
+  "transport": "message-channel",
+  "leaves": [
+    {
+      "match": {"row": "0", "col": "*"},
+      "proc": "embedStage",
+      "binds": {"south": "2"}
+    },
+    {
+      "match": {"default": true},
+      "proc": "idle"
+    }
+  ]
+}
+```
+
+Note that `processor(*, *)` collapses to `"default": true`, identically to a bare `default` clause — a host never needs to special-case "wildcards both dimensions" as distinct from "no `processor(...)` matched."
+
 <a id="top"></a>
 
 # The Bil Guide

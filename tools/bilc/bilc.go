@@ -11,7 +11,6 @@ import (
 	"go/scanner"
 	"go/token"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -262,7 +261,6 @@ type transformer struct {
 // by matchLinkReceive/matchLinkSend and the link-rejection guards via
 // resolvePlaceAlias.
 type placeAliasScope struct {
-	procName       string // the enclosing proc/func's name -- used by PlacementManifest to group aliases
 	bodyLo, bodyHi int
 	aliases        map[string]string
 }
@@ -1194,9 +1192,9 @@ func (t *transformer) collectFuncBodyRanges() (ranges []funcBodyRange) {
 }
 
 // buildFuncBodyIndex populates t.funcBodyByName from collectFuncBodyRanges
-// -- run once, early, by both Transform and PlacementManifest, before
-// anything that needs to look up a placed-called proc's parameter list or
-// body range by name.
+// -- run once, early, by Transform, DeployManifest, and RoleBinaries alike,
+// before anything that needs to look up a placed-called proc's parameter
+// list or body range by name.
 func (t *transformer) buildFuncBodyIndex() {
 	t.funcBodyByName = map[string]funcBodyRange{}
 	for _, br := range t.collectFuncBodyRanges() {
@@ -1583,7 +1581,7 @@ func (t *transformer) collectPlacedCallSites() error {
 		placedElsewhere[callee] = callPos
 
 		if len(aliases) > 0 {
-			t.placeAliases = append(t.placeAliases, placeAliasScope{procName: callee, bodyLo: br.bodyLo, bodyHi: br.bodyHi, aliases: aliases})
+			t.placeAliases = append(t.placeAliases, placeAliasScope{bodyLo: br.bodyLo, bodyHi: br.bodyHi, aliases: aliases})
 		}
 		return nil
 	}
@@ -1611,10 +1609,11 @@ func (t *transformer) collectPlacedCallSites() error {
 // checkNoNestedPlacedPar rejects a placed par block that appears
 // anywhere inside another placed par block's braces. Nesting would be
 // meaningless: a processor(...) clause already gates on this node's
-// own identity down to exactly one node (or, for default, "every node
-// not otherwise matched") -- a further placed par inside it could only
-// ever re-test dispatch that's already been resolved, or express a
-// switch no single node could ever diverge on.
+// own identity down to exactly one node (or, for a fully-wild clause
+// like processor(*, *), "every node not otherwise matched") -- a
+// further placed par inside it could only ever re-test dispatch that's
+// already been resolved, or express a switch no single node could ever
+// diverge on.
 func (t *transformer) checkNoNestedPlacedPar() error {
 	isHeader := func(i int) bool {
 		return t.toks[i].tok == token.IDENT && t.toks[i].lit == "placed" &&
@@ -1887,15 +1886,14 @@ func (t *transformer) splitCommaExprs(lo, hi int) (exprs []string, ok bool) {
 
 // placedClause is one parsed clause inside a `placed par { ... }` block:
 // either `processor(ID) { BODY }` (idExpr set, the flat, topology-agnostic
-// form backed by bilink.ID()), `processor(R, C) { BODY }` (rowExpr/colExpr
-// set, the grid-convenient form backed by bilink.Row()/Col()), or
-// `default { BODY }` (isDefault set). Both processor arities are always
-// available side by side in the same block -- neither desugars through the
-// other, they're two independent, valid ways to write the same underlying
-// switch case (see the "Design decisions" discussion this construct came
-// out of: occam's own PROCESSOR is a topology-agnostic flat int, but a 2D
-// grid is Bil's dominant case and deserves not to need row*cols+col
-// arithmetic by hand).
+// form backed by bilink.ID()) or `processor(R, C) { BODY }` (rowExpr/colExpr
+// set, the grid-convenient form backed by bilink.Row()/Col()). Both
+// processor arities are always available side by side in the same block --
+// neither desugars through the other, they're two independent, valid ways
+// to write the same underlying switch case (see the "Design decisions"
+// discussion this construct came out of: occam's own PROCESSOR is a
+// topology-agnostic flat int, but a 2D grid is Bil's dominant case and
+// deserves not to need row*cols+col arithmetic by hand).
 //
 // Either slot of the two-arg form may be a literal `*` instead of an
 // expression -- `processor(1, *)` matches every column of row 1,
@@ -1904,54 +1902,43 @@ func (t *transformer) splitCommaExprs(lo, hi int) (exprs []string, ok bool) {
 // field, since "*" can never be a real Go expression and every consumer
 // here already just holds these as opaque source text. `processor(*)`
 // (the one-arg form) and `processor(*, *)` both mean "matches every
-// node" -- exactly what `default` means -- and are treated identically
-// to an explicit `default` clause everywhere downstream (isFullyWild),
-// right down to needing to be the block's last clause for the same
-// reason: placement's whole point is the identity gate, so a clause
-// after the one that matches everything could never be reached.
+// node" -- the catch-all, in place of a separate `default` construct
+// (removed: it was exactly, only ever, a third spelling of this same
+// thing) -- right down to needing to be the block's last clause, for the
+// reason placement's whole point is the identity gate, so a clause after
+// the one that matches everything could never be reached.
 type placedClause struct {
-	isDefault      bool
 	idExpr         string
 	rowExpr        string
 	colExpr        string
 	bodyLo, bodyHi int
 }
 
-// isFullyWild reports whether cl matches every node -- an explicit
-// `default` clause, `processor(*)`, or `processor(*, *)` -- as opposed
-// to a partial wildcard (`processor(1, *)`) which narrows on one
-// dimension but still leaves the other an identity gate.
+// isFullyWild reports whether cl matches every node -- `processor(*)` or
+// `processor(*, *)` -- as opposed to a partial wildcard (`processor(1,
+// *)`) which narrows on one dimension but still leaves the other an
+// identity gate.
 func (cl placedClause) isFullyWild() bool {
-	return cl.isDefault || cl.idExpr == "*" || (cl.rowExpr == "*" && cl.colExpr == "*")
+	return cl.idExpr == "*" || (cl.rowExpr == "*" && cl.colExpr == "*")
 }
 
 // parsePlacedParClauses parses every clause of a `placed par { ... }` block
 // ([lo,hi) is the block's interior; hi is the index of its closing `}`).
-// An optional `default { BODY }` must come last if present -- placement's
-// whole point is the identity gate, so every other clause must be a
-// `processor(...)`, never a bare `proc` call/seq/nested par/bare block the
-// way an ordinary `par`'s branches can be.
+// A fully-wild clause (`processor(*)` or `processor(*, *)`, the catch-all
+// -- see isFullyWild) must come last if present -- placement's whole point
+// is the identity gate, so every clause must be a `processor(...)`, never
+// a bare `proc` call/seq/nested par/bare block the way an ordinary `par`'s
+// branches can be.
 func (t *transformer) parsePlacedParClauses(lo, hi int) (clauses []placedClause, ok bool) {
 	j := lo
-	sawDefault := false
+	sawFullyWild := false
 	for j < hi {
 		if t.toks[j].tok == token.SEMICOLON {
 			j++
 			continue
 		}
-		if sawDefault {
-			return nil, false // default must be the last clause
-		}
-		if t.toks[j].tok == token.DEFAULT {
-			j++
-			if j >= hi || t.toks[j].tok != token.LBRACE {
-				return nil, false
-			}
-			bodyClose := matchBrace(t.toks, j)
-			clauses = append(clauses, placedClause{isDefault: true, bodyLo: j + 1, bodyHi: bodyClose})
-			j = bodyClose + 1
-			sawDefault = true
-			continue
+		if sawFullyWild {
+			return nil, false // the catch-all clause must be last
 		}
 		if t.toks[j].tok != token.IDENT || t.toks[j].lit != "processor" {
 			return nil, false
@@ -1978,7 +1965,7 @@ func (t *transformer) parsePlacedParClauses(lo, hi int) (clauses []placedClause,
 		}
 		clauses = append(clauses, cl)
 		if cl.isFullyWild() {
-			sawDefault = true // processor(*)/processor(*, *) matches everything, same as default
+			sawFullyWild = true
 		}
 		j = bodyClose + 1
 	}
@@ -2058,11 +2045,11 @@ func (t *transformer) emitPlacedParClauses(out *bytes.Buffer, lo, hi int) {
 	for _, cl := range clauses {
 		switch {
 		case cl.isFullyWild():
-			// `default`, `processor(*)`, and `processor(*, *)` all match
-			// every node -- Go's own `default:` already means exactly
-			// that, and (unlike an ordinary `case`) runs last regardless
-			// of where it sits among the other cases, so it needs no
-			// comparison at all.
+			// `processor(*)` and `processor(*, *)` both match every node
+			// -- Go's own `default:` already means exactly that, and
+			// (unlike an ordinary `case`) runs last regardless of where
+			// it sits among the other cases, so it needs no comparison
+			// at all.
 			out.WriteString("default:\n")
 		case cl.idExpr != "":
 			out.WriteString("case bilink.ID() == " + cl.idExpr + ":\n")
@@ -2184,8 +2171,10 @@ type resolvedLeaf struct {
 // par { ... }` block: lo,hi bound its interior, matching
 // parsePlacedParClauses's own convention. found is false for a file
 // with no placed par at all. (v1 doesn't support more than one such
-// block per file in practice -- see PlacementManifest's own doc comment
-// -- so "first" and "only" coincide for every real file today.)
+// block per file in practice -- the construct is a standalone statement,
+// not nestable, so a file with more than one is unusual enough not to
+// need DeployManifest/RoleBinaries to anticipate it yet -- so "first"
+// and "only" coincide for every real file today.)
 func (t *transformer) findPlacedParBlock() (lo, hi int, found bool) {
 	for i := 0; i+2 < len(t.toks); i++ {
 		if t.toks[i].tok == token.IDENT && t.toks[i].lit == "placed" &&
@@ -2479,7 +2468,7 @@ func (t *transformer) transform(lo, hi int) []byte {
 		case tk.tok == token.IDENT && tk.lit == "placed" &&
 			i+1 < hi && t.toks[i+1].tok == token.IDENT && t.toks[i+1].lit == "par" &&
 			i+2 < hi && t.toks[i+2].tok == token.LBRACE:
-			// `placed par { processor(...) { BODY } ... default { BODY } }`
+			// `placed par { processor(...) { BODY } ... processor(*, *) { BODY } }`
 			// — see emitPlacedParClauses. "placed" and "par" are distinct
 			// token literals (never equal), so this needs no ordering
 			// relative to the plain `par` cases below the way `pri alt`
@@ -2876,193 +2865,17 @@ func (t *transformer) checkNoBufferedChannels() error {
 	return nil
 }
 
-// singleCallText reports whether the body [lo,hi) reduces to exactly one
-// bare call statement (`name(...)`, no other statements before or after,
-// modulo semicolons and any number of leading `place NAME at link[EXPR]`
-// declarations) — and if so, returns the called function's name.
-// Used only by PlacementManifest, to decide whether a placement clause's
-// body can be summarized as "this proc runs here"; a clause whose body
-// does anything else (an if/else, several statements, ...) is recorded in
-// the manifest as structurally present but left unresolved — see
-// PlacementManifest's own doc comment for why that's the honest answer
-// rather than a bug to fix.
-func (t *transformer) singleCallText(lo, hi int) (name string, ok bool) {
-	i := lo
-	for i < hi {
-		if t.toks[i].tok == token.SEMICOLON {
-			i++
-			continue
-		}
-		if _, _, _, end, declOK := t.parsePlaceDecl(i, hi); declOK {
-			i = end
-			continue
-		}
-		break
-	}
-	if i >= hi || t.toks[i].tok != token.IDENT {
-		return "", false
-	}
-	nameTok := i
-	if i+1 >= hi || t.toks[i+1].tok != token.LPAREN {
-		return "", false
-	}
-	close := matchParen(t.toks, i+1)
-	j := close + 1
-	for j < hi && t.toks[j].tok == token.SEMICOLON {
-		j++
-	}
-	if j != hi {
-		return "", false // more than the one statement
-	}
-	return t.toks[nameTok].lit, true
-}
-
-// yamlScalar renders expr — an arbitrary Go expression's source text, not
-// a YAML-native value — as a single YAML flow scalar: unquoted only when
-// it's a plain integer literal (so `id: 0` reads cleanly), double-quoted
-// otherwise (`col: "cols-1"`), since almost everything placement deals in
-// (`cols-1`, `north`, a role name) is source text YAML would otherwise
-// try, and fail, to parse as one of its own types.
-func yamlScalar(expr string) string {
-	isInt := len(expr) > 0
-	for i, r := range expr {
-		if r >= '0' && r <= '9' {
-			continue
-		}
-		if i == 0 && r == '-' {
-			continue
-		}
-		isInt = false
-		break
-	}
-	if isInt {
-		return expr
-	}
-	return `"` + strings.ReplaceAll(expr, `"`, `\"`) + `"`
-}
-
-// PlacementManifest builds the topology manifest for a `placed par`-using
-// .bil source file — a small, deliberately incomplete YAML description of
-// a program's declared placement structure (which processor(s) run which
-// proc, and each proc's link aliases), pulled forward from the much
-// bigger, unstarted "layout tooling" subproject (processor -> host,
-// channel -> link) because it falls out of bilc's own parsing almost for
-// free: parsePlacedParClauses and collectPlacedCallSites already fully
-// parse this structure to emit the runtime `switch`, so serializing it
-// costs little more. Note the `links: aliases:` section below is keyed by
-// each callee's own parameter names, not by whatever local name a call
-// site chose for its `place` statements — see placeAliases' own doc
-// comment. Returns (nil, nil) for a file with no
-// `placed par` block at all — most .bil files — so callers can treat a
-// nil result as "nothing to write" without a separate has-any check of
-// their own. Deliberately not a build-time image splitter, host mapper,
-// or bootstrap protocol — those need real design work this file doesn't
-// attempt.
-//
-// The manifest can only ever describe *structure*, never fully-resolved
-// concrete positions: `processor(0, cols-1)` depends on `cols`, a value
-// chosen when a program is launched, which bilc never knows at transform
-// time. It also can't always name a single proc for a clause — the
-// canonical worked example's `default` branch has an if/else inside it,
-// so that clause is recorded with no `proc:` line rather than a guess
-// (see singleCallText). This is intentional, honest incompleteness, not
-// a bug: resolving it further would mean fixing grid dimensions at
-// bilc-compile time, which is exactly the heterogeneous-multi-image
-// build model this design deliberately isn't taking on.
-//
-// Only the first `placed par` block in a file is described — v1 only
-// ever has one in practice, since the construct is a standalone
-// statement (not nestable), so a file with more than one is unusual
-// enough not to need the manifest format to anticipate it yet.
-func PlacementManifest(filename string, src []byte) ([]byte, error) {
-	if abs, err := filepath.Abs(filename); err == nil {
-		filename = abs
-	}
-	t := tokenize(filename, src)
-	t.buildFuncBodyIndex()
-	if err := t.collectPlacedCallSites(); err != nil {
-		return nil, err
-	}
-	var clauses []placedClause
-	for i := 0; i+2 < len(t.toks); i++ {
-		if !(t.toks[i].tok == token.IDENT && t.toks[i].lit == "placed" &&
-			t.toks[i+1].tok == token.IDENT && t.toks[i+1].lit == "par" &&
-			t.toks[i+2].tok == token.LBRACE) {
-			continue
-		}
-		close := matchBrace(t.toks, i+2)
-		var ok bool
-		clauses, ok = t.parsePlacedParClauses(i+3, close)
-		if !ok {
-			clauses = nil
-		}
-		break
-	}
-	if len(clauses) == 0 {
-		return nil, nil
-	}
-
-	var out bytes.Buffer
-	out.WriteString("placements:\n")
-	var defaultClause *placedClause
-	for i := range clauses {
-		cl := &clauses[i]
-		if cl.isFullyWild() {
-			// processor(*)/processor(*, *) match every node, same as an
-			// explicit `default` clause -- fold into the same section
-			// rather than listing them as just another placement match.
-			defaultClause = cl
-			continue
-		}
-		out.WriteString("  - match: {")
-		if cl.idExpr != "" {
-			fmt.Fprintf(&out, "id: %s", yamlScalar(cl.idExpr))
-		} else {
-			fmt.Fprintf(&out, "row: %s, col: %s", yamlScalar(cl.rowExpr), yamlScalar(cl.colExpr))
-		}
-		out.WriteString("}\n")
-		if proc, ok := t.singleCallText(cl.bodyLo, cl.bodyHi); ok {
-			fmt.Fprintf(&out, "    proc: %s\n", proc)
-		}
-	}
-	if defaultClause != nil {
-		out.WriteString("default:\n")
-		if proc, ok := t.singleCallText(defaultClause.bodyLo, defaultClause.bodyHi); ok {
-			fmt.Fprintf(&out, "  proc: %s\n", proc)
-		}
-	}
-
-	if len(t.placeAliases) > 0 {
-		scopes := append([]placeAliasScope(nil), t.placeAliases...)
-		sort.Slice(scopes, func(i, j int) bool { return scopes[i].procName < scopes[j].procName })
-		out.WriteString("links:\n  aliases:\n")
-		for _, scope := range scopes {
-			names := make([]string, 0, len(scope.aliases))
-			for name := range scope.aliases {
-				names = append(names, name)
-			}
-			sort.Strings(names)
-			fmt.Fprintf(&out, "    %s: {", scope.procName)
-			for i, name := range names {
-				if i > 0 {
-					out.WriteString(", ")
-				}
-				fmt.Fprintf(&out, "%s: %s", name, yamlScalar(scope.aliases[name]))
-			}
-			out.WriteString("}\n")
-		}
-	}
-	return out.Bytes(), nil
-}
-
 // DeployManifest builds the JSON deployment manifest a host needs to
-// resolve concrete per-node role assignment at grid-launch time --
-// distinct from PlacementManifest's `.topology.yaml` (a deliberately
-// incomplete, human-readable summary of structure): this one is a
-// complete, mechanical description of every reachable placed-par leaf,
+// resolve concrete per-node role assignment at grid-launch time -- the
+// only manifest bilc produces (an earlier `.topology.yaml` sibling,
+// deliberately incomplete for human reading, was dropped: it duplicated
+// this one's information with a weaker completeness guarantee, and
+// `tools/topology2svg` now renders straight from `roles/deploy.json`
+// instead). This one is a complete, mechanical description of every
+// reachable placed-par leaf,
 // meant only for a program to consume, never a person to read. Each
 // leaf records: which top-level clause it belongs to (an id, a row/col
-// pair, or the default clause), the ordered chain of if/else conditions
+// pair, or the fully-wild catch-all clause), the ordered chain of if/else conditions
 // (as raw source text, e.g. "r == 0", plus whether this leaf is that
 // condition's else-side) needed to reach it, which proc it calls, and
 // that call's own link-index bindings keyed by the callee's declared
@@ -3075,8 +2888,8 @@ func PlacementManifest(filename string, src []byte) ([]byte, error) {
 // instead of an expression (from a partial wildcard like
 // `processor(1, *)`) -- needs no expression evaluator at all, a host
 // just skips comparing that one dimension. A match that wildcards both
-// (or a bare `default`/`processor(*)`) is reported as Default instead,
-// not as Row/Col "*","*" -- see isFullyWild -- so a host never needs to
+// (`processor(*)`/`processor(*, *)`) is reported as Default instead, not
+// as Row/Col "*","*" -- see isFullyWild -- so a host never needs to
 // special-case "*" against Default, only against a real expression in
 // the other slot.
 func DeployManifest(filename string, src []byte) ([]byte, error) {
@@ -3130,9 +2943,8 @@ func DeployManifest(filename string, src []byte) ([]byte, error) {
 		m := jsonMatch{}
 		switch {
 		case leaf.clause.isFullyWild():
-			// default, processor(*), and processor(*, *) all match every
-			// node -- indistinguishable to a host, which only ever needs
-			// to know "no comparison required."
+			// processor(*) and processor(*, *) both match every node --
+			// a host only ever needs to know "no comparison required."
 			m.Default = true
 		case leaf.clause.idExpr != "":
 			m.ID = leaf.clause.idExpr
@@ -3165,7 +2977,7 @@ func Transform(filename string, src []byte) ([]byte, error) {
 // relying on Go's own linker to drop what isn't reachable, is both
 // simpler and more robust than bilc slicing out one role's own
 // dependency closure by hand). Returns (nil, nil) for a file with no
-// placed par at all, mirroring PlacementManifest's own convention.
+// placed par at all, mirroring DeployManifest's own convention.
 func RoleBinaries(filename string, src []byte) (map[string][]byte, error) {
 	if abs, err := filepath.Abs(filename); err == nil {
 		filename = abs

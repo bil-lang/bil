@@ -325,7 +325,7 @@ func main() {
 		processor(0, 0) {
 			controller()
 		}
-		default {
+		processor(*, *) {
 			relay()
 		}
 	}
@@ -392,7 +392,7 @@ func main() {
 		processor(0) {
 			controller()
 		}
-		default {
+		processor(*) {
 			idle()
 		}
 	}
@@ -462,93 +462,6 @@ func main() {
 	}
 }
 
-// TestPlacementManifest exercises the topology manifest against a fixture
-// using both `processor` arities plus a `default` (with an if/else body,
-// so it's recorded with no `proc:` line — see PlacementManifest's own
-// doc comment for why that's correct, not a gap) and two placed call
-// sites, and confirms an ordinary (non-`placed par`) file gets no manifest
-// at all rather than an empty one. The `links: aliases:` section is keyed
-// by each callee's own parameter name (toEast, toWest), not by the
-// call-site's local place name — see PlacementManifest's own doc comment.
-func TestPlacementManifest(t *testing.T) {
-	src := []byte(`package main
-
-proc controller(toEast chan<- int32) {
-	toEast <- 1
-}
-
-proc rowEnd(toWest chan<- int32) {
-	toWest <- 1
-}
-
-proc relay() {
-	println("relay")
-}
-
-proc idle() {
-	println("idle")
-}
-
-func main() {
-	r, cols := 0, 4
-	placed par {
-		processor(0, 0) {
-			place toEast at link[1]
-			controller(toEast)
-		}
-		processor(0, cols-1) {
-			place toWest at link[3]
-			rowEnd(toWest)
-		}
-		default {
-			if r == 0 {
-				relay()
-			} else {
-				idle()
-			}
-		}
-	}
-}
-`)
-	m, err := PlacementManifest("test.bil", src)
-	if err != nil {
-		t.Fatalf("PlacementManifest: %v", err)
-	}
-	got := string(m)
-	for _, want := range []string{
-		"match: {row: 0, col: 0}",
-		"proc: controller",
-		`match: {row: 0, col: "cols-1"}`,
-		"proc: rowEnd",
-		"default:",
-		"toEast: 1",
-		"toWest: 3",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("expected %q in manifest, got:\n%s", want, got)
-		}
-	}
-	// default's body is an if/else, not a single call -- it must not be
-	// credited with a resolved proc name it doesn't actually have.
-	if strings.Contains(got, "proc: relay") || strings.Contains(got, "proc: idle") {
-		t.Errorf("expected default's unresolved if/else body to have no proc: line, got:\n%s", got)
-	}
-
-	noPlacement := []byte(`package main
-
-func main() {
-	println("hello")
-}
-`)
-	m2, err := PlacementManifest("test.bil", noPlacement)
-	if err != nil {
-		t.Fatalf("PlacementManifest (no placed par): %v", err)
-	}
-	if m2 != nil {
-		t.Errorf("expected nil manifest for a file with no placed par block, got:\n%s", m2)
-	}
-}
-
 // TestRoleBinaries checks that RoleBinaries emits one standalone,
 // syntactically valid Go file per distinct placed-par role, each with
 // its own main() calling only that role's proc -- and that every
@@ -587,7 +500,7 @@ func main() {
 			place toWest at link[3]
 			rowEnd(toWest)
 		}
-		default {
+		processor(*, *) {
 			if r == 0 {
 				relay()
 			} else {
@@ -676,7 +589,7 @@ func main() {
 			place toWest at link[3]
 			rowEnd(toWest)
 		}
-		default {
+		processor(*, *) {
 			if r == 0 {
 				relay()
 			} else {
@@ -728,13 +641,12 @@ func main() {
 }
 
 // TestPlacedParWildcard exercises `processor(...)`'s wildcard forms
-// across all four consumers that parse a placed-par block: Transform's
-// switch codegen, PlacementManifest's YAML, DeployManifest's JSON, and
-// RoleBinaries' per-role Go. The fixture uses `processor(1, *)` (row
-// pinned, column wild) and `processor(*, *)` (fully wild, replacing an
-// explicit `default`) side by side with an ordinary exact-node clause,
-// so each consumer's wildcard-vs-exact handling can be checked in one
-// place.
+// across all three consumers that parse a placed-par block: Transform's
+// switch codegen, DeployManifest's JSON, and RoleBinaries' per-role Go.
+// The fixture uses `processor(1, *)` (row pinned, column wild) and
+// `processor(*, *)` (fully wild, replacing an explicit `default`) side
+// by side with an ordinary exact-node clause, so each consumer's
+// wildcard-vs-exact handling can be checked in one place.
 func TestPlacedParWildcard(t *testing.T) {
 	src := []byte(`package main
 
@@ -783,30 +695,6 @@ func main() {
 	// literal `*` spliced into a comparison -- that would be invalid Go.
 	if strings.Contains(got, "== *") || strings.Contains(got, "* ==") {
 		t.Errorf("expected the wildcard sentinel to never reach a comparison, got:\n%s", got)
-	}
-
-	pm, err := PlacementManifest("test.bil", src)
-	if err != nil {
-		t.Fatalf("PlacementManifest: %v", err)
-	}
-	gotPM := string(pm)
-	for _, want := range []string{
-		"match: {row: 1, col: 0}",
-		"proc: controller",
-		`match: {row: 1, col: "*"}`,
-		"proc: relay",
-		"default:",
-		"proc: idle",
-	} {
-		if !strings.Contains(gotPM, want) {
-			t.Errorf("expected %q in placement manifest, got:\n%s", want, gotPM)
-		}
-	}
-	// processor(*, *) folds into the same `default:` section as an
-	// explicit `default` clause would -- it must not also appear as its
-	// own `- match: {...}` list entry.
-	if strings.Contains(gotPM, `col: "*", `) || strings.Contains(gotPM, `row: "*"`) {
-		t.Errorf("expected the fully-wild clause to be folded into default:, not listed as its own match, got:\n%s", gotPM)
 	}
 
 	dm, err := DeployManifest("test.bil", src)
@@ -933,7 +821,7 @@ proc idle() {
 func main() {
 	r := 0
 	placed par {
-		default {
+		processor(*, *) {
 			if r == 0 {
 				place in at link[3]
 				place out at link[1]

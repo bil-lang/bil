@@ -1,47 +1,279 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="390" viewBox="0 0 1300 390" font-family="Helvetica, Arial, sans-serif">
-<title>main.topology.yaml</title>
-<rect x="0" y="0" width="1300" height="390" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1510" height="950" viewBox="0 0 1510 950" font-family="Helvetica, Arial, sans-serif">
+<title>pipelinetransformer</title>
+<rect x="0" y="0" width="1510" height="950" fill="#ffffff"/>
 <defs><marker id="arrow-out" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#333"/></marker></defs>
-<text x="50" y="50" font-size="18" font-weight="bold" fill="#222">main.topology.yaml</text>
-<rect x="50" y="90" width="150" height="80" rx="10" fill="#EDEDED" fill-opacity="1" stroke="#888888" stroke-dasharray="6,4" stroke-width="1.5"/>
-<text x="125.0" y="126.0" text-anchor="middle" font-size="15" font-weight="600" fill="#666666">default</text>
-<text x="125.0" y="146.0" text-anchor="middle" font-size="10" fill="#666666" opacity="0.85">row 0, col 0</text>
-<rect x="260" y="90" width="150" height="80" rx="10" fill="#EDEDED" fill-opacity="1" stroke="#888888" stroke-dasharray="6,4" stroke-width="1.5"/>
-<text x="335.0" y="126.0" text-anchor="middle" font-size="15" font-weight="600" fill="#666666">default</text>
-<text x="335.0" y="146.0" text-anchor="middle" font-size="10" fill="#666666" opacity="0.85">row 0, col 1</text>
-<rect x="470" y="90" width="150" height="80" rx="10" fill="#EDEDED" fill-opacity="1" stroke="#888888" stroke-dasharray="6,4" stroke-width="1.5"/>
-<text x="545.0" y="126.0" text-anchor="middle" font-size="15" font-weight="600" fill="#666666">default</text>
-<text x="545.0" y="146.0" text-anchor="middle" font-size="10" fill="#666666" opacity="0.85">row 0, col 2</text>
-<rect x="680" y="90" width="150" height="80" rx="10" fill="#EDEDED" fill-opacity="1" stroke="#888888" stroke-dasharray="6,4" stroke-width="1.5"/>
-<text x="755.0" y="126.0" text-anchor="middle" font-size="15" font-weight="600" fill="#666666">default</text>
-<text x="755.0" y="146.0" text-anchor="middle" font-size="10" fill="#666666" opacity="0.85">row 0, col 3</text>
-<rect x="890" y="90" width="150" height="80" rx="10" fill="#EDEDED" fill-opacity="1" stroke="#888888" stroke-dasharray="6,4" stroke-width="1.5"/>
-<text x="965.0" y="126.0" text-anchor="middle" font-size="15" font-weight="600" fill="#666666">default</text>
-<text x="965.0" y="146.0" text-anchor="middle" font-size="10" fill="#666666" opacity="0.85">row 0, col 4</text>
-<rect x="1100" y="90" width="150" height="80" rx="10" fill="#EDEDED" fill-opacity="1" stroke="#888888" stroke-dasharray="6,4" stroke-width="1.5"/>
-<text x="1175.0" y="126.0" text-anchor="middle" font-size="15" font-weight="600" fill="#666666">default</text>
-<text x="1175.0" y="146.0" text-anchor="middle" font-size="10" fill="#666666" opacity="0.85">row 0, col 5</text>
-<rect x="50" y="230" width="150" height="80" rx="10" fill="#E69F00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="50" y="50" font-size="18" font-weight="bold" fill="#222">pipelinetransformer</text>
+<rect x="50" y="90" width="150" height="80" rx="10" fill="#E69F00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="125.0" y="126.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">embedStage</text>
+<text x="125.0" y="146.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 0, col 0</text>
+<line x1="125.0" y1="170.0" x2="125.0" y2="200.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="125.0" y="216.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<rect x="260" y="90" width="150" height="80" rx="10" fill="#E69F00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="335.0" y="126.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">embedStage</text>
+<text x="335.0" y="146.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 0, col 1</text>
+<line x1="335.0" y1="170.0" x2="335.0" y2="200.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="335.0" y="216.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<rect x="470" y="90" width="150" height="80" rx="10" fill="#E69F00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="545.0" y="126.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">embedStage</text>
+<text x="545.0" y="146.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 0, col 2</text>
+<line x1="545.0" y1="170.0" x2="545.0" y2="200.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="545.0" y="216.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<rect x="680" y="90" width="150" height="80" rx="10" fill="#E69F00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="755.0" y="126.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">embedStage</text>
+<text x="755.0" y="146.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 0, col 3</text>
+<line x1="755.0" y1="170.0" x2="755.0" y2="200.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="755.0" y="216.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<rect x="890" y="90" width="150" height="80" rx="10" fill="#E69F00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="965.0" y="126.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">embedStage</text>
+<text x="965.0" y="146.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 0, col 4</text>
+<line x1="965.0" y1="170.0" x2="965.0" y2="200.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="965.0" y="216.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<rect x="1100" y="90" width="150" height="80" rx="10" fill="#E69F00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="1175.0" y="126.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">embedStage</text>
+<text x="1175.0" y="146.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 0, col 5</text>
+<line x1="1175.0" y1="170.0" x2="1175.0" y2="200.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1175.0" y="216.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<rect x="1310" y="90" width="150" height="80" rx="10" fill="#E69F00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="1385.0" y="126.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">embedStage</text>
+<text x="1385.0" y="146.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 0, col 6</text>
+<line x1="1385.0" y1="170.0" x2="1385.0" y2="200.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1385.0" y="216.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<rect x="50" y="230" width="150" height="80" rx="10" fill="#56B4E9" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
 <text x="125.0" y="266.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">attnController</text>
 <text x="125.0" y="286.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 1, col 0</text>
-<rect x="260" y="230" width="150" height="80" rx="10" fill="#EDEDED" fill-opacity="1" stroke="#888888" stroke-dasharray="6,4" stroke-width="1.5"/>
-<text x="335.0" y="266.0" text-anchor="middle" font-size="15" font-weight="600" fill="#666666">default</text>
-<text x="335.0" y="286.0" text-anchor="middle" font-size="10" fill="#666666" opacity="0.85">row 1, col 1</text>
-<rect x="470" y="230" width="150" height="80" rx="10" fill="#EDEDED" fill-opacity="1" stroke="#888888" stroke-dasharray="6,4" stroke-width="1.5"/>
-<text x="545.0" y="266.0" text-anchor="middle" font-size="15" font-weight="600" fill="#666666">default</text>
-<text x="545.0" y="286.0" text-anchor="middle" font-size="10" fill="#666666" opacity="0.85">row 1, col 2</text>
-<rect x="680" y="230" width="150" height="80" rx="10" fill="#EDEDED" fill-opacity="1" stroke="#888888" stroke-dasharray="6,4" stroke-width="1.5"/>
-<text x="755.0" y="266.0" text-anchor="middle" font-size="15" font-weight="600" fill="#666666">default</text>
-<text x="755.0" y="286.0" text-anchor="middle" font-size="10" fill="#666666" opacity="0.85">row 1, col 3</text>
-<rect x="890" y="230" width="150" height="80" rx="10" fill="#EDEDED" fill-opacity="1" stroke="#888888" stroke-dasharray="6,4" stroke-width="1.5"/>
-<text x="965.0" y="266.0" text-anchor="middle" font-size="15" font-weight="600" fill="#666666">default</text>
-<text x="965.0" y="286.0" text-anchor="middle" font-size="10" fill="#666666" opacity="0.85">row 1, col 4</text>
-<rect x="1100" y="230" width="150" height="80" rx="10" fill="#56B4E9" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
-<text x="1175.0" y="266.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">attnRowEnd</text>
+<line x1="200.0" y1="263.0" x2="230.0" y2="263.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="230.0" y="255.0" text-anchor="middle" font-size="10" fill="#333">eastIn:1</text>
+<line x1="200.0" y1="277.0" x2="230.0" y2="277.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="230.0" y="269.0" text-anchor="middle" font-size="10" fill="#333">eastOut:1</text>
+<line x1="125.0" y1="230.0" x2="125.0" y2="200.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="125.0" y="192.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<line x1="125.0" y1="310.0" x2="125.0" y2="340.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="125.0" y="356.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<rect x="260" y="230" width="150" height="80" rx="10" fill="#009E73" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="335.0" y="266.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">attnRelay</text>
+<text x="335.0" y="286.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 1, col 1</text>
+<line x1="410.0" y1="263.0" x2="440.0" y2="263.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="440.0" y="255.0" text-anchor="middle" font-size="10" fill="#333">eastIn:1</text>
+<line x1="410.0" y1="277.0" x2="440.0" y2="277.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="440.0" y="269.0" text-anchor="middle" font-size="10" fill="#333">eastOut:1</text>
+<line x1="335.0" y1="230.0" x2="335.0" y2="200.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="335.0" y="192.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<line x1="335.0" y1="310.0" x2="335.0" y2="340.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="335.0" y="356.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<line x1="260.0" y1="263.0" x2="230.0" y2="263.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="230.0" y="255.0" text-anchor="middle" font-size="10" fill="#333">westIn:3</text>
+<line x1="260.0" y1="277.0" x2="230.0" y2="277.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="230.0" y="269.0" text-anchor="middle" font-size="10" fill="#333">westOut:3</text>
+<rect x="470" y="230" width="150" height="80" rx="10" fill="#009E73" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="545.0" y="266.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">attnRelay</text>
+<text x="545.0" y="286.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 1, col 2</text>
+<line x1="620.0" y1="263.0" x2="650.0" y2="263.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="650.0" y="255.0" text-anchor="middle" font-size="10" fill="#333">eastIn:1</text>
+<line x1="620.0" y1="277.0" x2="650.0" y2="277.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="650.0" y="269.0" text-anchor="middle" font-size="10" fill="#333">eastOut:1</text>
+<line x1="545.0" y1="230.0" x2="545.0" y2="200.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="545.0" y="192.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<line x1="545.0" y1="310.0" x2="545.0" y2="340.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="545.0" y="356.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<line x1="470.0" y1="263.0" x2="440.0" y2="263.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="440.0" y="255.0" text-anchor="middle" font-size="10" fill="#333">westIn:3</text>
+<line x1="470.0" y1="277.0" x2="440.0" y2="277.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="440.0" y="269.0" text-anchor="middle" font-size="10" fill="#333">westOut:3</text>
+<rect x="680" y="230" width="150" height="80" rx="10" fill="#009E73" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="755.0" y="266.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">attnRelay</text>
+<text x="755.0" y="286.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 1, col 3</text>
+<line x1="830.0" y1="263.0" x2="860.0" y2="263.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="860.0" y="255.0" text-anchor="middle" font-size="10" fill="#333">eastIn:1</text>
+<line x1="830.0" y1="277.0" x2="860.0" y2="277.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="860.0" y="269.0" text-anchor="middle" font-size="10" fill="#333">eastOut:1</text>
+<line x1="755.0" y1="230.0" x2="755.0" y2="200.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="755.0" y="192.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<line x1="755.0" y1="310.0" x2="755.0" y2="340.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="755.0" y="356.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<line x1="680.0" y1="263.0" x2="650.0" y2="263.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="650.0" y="255.0" text-anchor="middle" font-size="10" fill="#333">westIn:3</text>
+<line x1="680.0" y1="277.0" x2="650.0" y2="277.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="650.0" y="269.0" text-anchor="middle" font-size="10" fill="#333">westOut:3</text>
+<rect x="890" y="230" width="150" height="80" rx="10" fill="#009E73" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="965.0" y="266.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">attnRelay</text>
+<text x="965.0" y="286.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 1, col 4</text>
+<line x1="1040.0" y1="263.0" x2="1070.0" y2="263.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1070.0" y="255.0" text-anchor="middle" font-size="10" fill="#333">eastIn:1</text>
+<line x1="1040.0" y1="277.0" x2="1070.0" y2="277.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1070.0" y="269.0" text-anchor="middle" font-size="10" fill="#333">eastOut:1</text>
+<line x1="965.0" y1="230.0" x2="965.0" y2="200.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="965.0" y="192.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<line x1="965.0" y1="310.0" x2="965.0" y2="340.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="965.0" y="356.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<line x1="890.0" y1="263.0" x2="860.0" y2="263.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="860.0" y="255.0" text-anchor="middle" font-size="10" fill="#333">westIn:3</text>
+<line x1="890.0" y1="277.0" x2="860.0" y2="277.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="860.0" y="269.0" text-anchor="middle" font-size="10" fill="#333">westOut:3</text>
+<rect x="1100" y="230" width="150" height="80" rx="10" fill="#009E73" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="1175.0" y="266.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">attnRelay</text>
 <text x="1175.0" y="286.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 1, col 5</text>
-<text x="50" y="334" font-size="11" fill="#555">Legend:</text>
-<rect x="110" y="324" width="12" height="12" rx="2" fill="#E69F00"/>
-<text x="126" y="334" font-size="11" fill="#333">attnController</text>
-<rect x="272" y="324" width="12" height="12" rx="2" fill="#56B4E9"/>
-<text x="288" y="334" font-size="11" fill="#333">attnRowEnd</text>
+<line x1="1250.0" y1="263.0" x2="1280.0" y2="263.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1280.0" y="255.0" text-anchor="middle" font-size="10" fill="#333">eastIn:1</text>
+<line x1="1250.0" y1="277.0" x2="1280.0" y2="277.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1280.0" y="269.0" text-anchor="middle" font-size="10" fill="#333">eastOut:1</text>
+<line x1="1175.0" y1="230.0" x2="1175.0" y2="200.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1175.0" y="192.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<line x1="1175.0" y1="310.0" x2="1175.0" y2="340.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1175.0" y="356.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<line x1="1100.0" y1="263.0" x2="1070.0" y2="263.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1070.0" y="255.0" text-anchor="middle" font-size="10" fill="#333">westIn:3</text>
+<line x1="1100.0" y1="277.0" x2="1070.0" y2="277.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1070.0" y="269.0" text-anchor="middle" font-size="10" fill="#333">westOut:3</text>
+<rect x="1310" y="230" width="150" height="80" rx="10" fill="#F0E442" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="1385.0" y="266.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">attnRowEnd</text>
+<text x="1385.0" y="286.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 1, col 6</text>
+<line x1="1385.0" y1="230.0" x2="1385.0" y2="200.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1385.0" y="192.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<line x1="1385.0" y1="310.0" x2="1385.0" y2="340.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1385.0" y="356.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<line x1="1310.0" y1="263.0" x2="1280.0" y2="263.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1280.0" y="255.0" text-anchor="middle" font-size="10" fill="#333">westIn:3</text>
+<line x1="1310.0" y1="277.0" x2="1280.0" y2="277.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1280.0" y="269.0" text-anchor="middle" font-size="10" fill="#333">westOut:3</text>
+<rect x="50" y="370" width="150" height="80" rx="10" fill="#0072B2" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="125.0" y="406.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">ffnStage</text>
+<text x="125.0" y="426.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 2, col 0</text>
+<line x1="125.0" y1="370.0" x2="125.0" y2="340.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="125.0" y="332.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<line x1="125.0" y1="450.0" x2="125.0" y2="480.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="125.0" y="496.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<rect x="260" y="370" width="150" height="80" rx="10" fill="#0072B2" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="335.0" y="406.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">ffnStage</text>
+<text x="335.0" y="426.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 2, col 1</text>
+<line x1="335.0" y1="370.0" x2="335.0" y2="340.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="335.0" y="332.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<line x1="335.0" y1="450.0" x2="335.0" y2="480.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="335.0" y="496.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<rect x="470" y="370" width="150" height="80" rx="10" fill="#0072B2" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="545.0" y="406.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">ffnStage</text>
+<text x="545.0" y="426.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 2, col 2</text>
+<line x1="545.0" y1="370.0" x2="545.0" y2="340.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="545.0" y="332.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<line x1="545.0" y1="450.0" x2="545.0" y2="480.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="545.0" y="496.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<rect x="680" y="370" width="150" height="80" rx="10" fill="#0072B2" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="755.0" y="406.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">ffnStage</text>
+<text x="755.0" y="426.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 2, col 3</text>
+<line x1="755.0" y1="370.0" x2="755.0" y2="340.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="755.0" y="332.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<line x1="755.0" y1="450.0" x2="755.0" y2="480.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="755.0" y="496.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<rect x="890" y="370" width="150" height="80" rx="10" fill="#0072B2" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="965.0" y="406.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">ffnStage</text>
+<text x="965.0" y="426.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 2, col 4</text>
+<line x1="965.0" y1="370.0" x2="965.0" y2="340.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="965.0" y="332.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<line x1="965.0" y1="450.0" x2="965.0" y2="480.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="965.0" y="496.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<rect x="1100" y="370" width="150" height="80" rx="10" fill="#0072B2" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="1175.0" y="406.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">ffnStage</text>
+<text x="1175.0" y="426.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 2, col 5</text>
+<line x1="1175.0" y1="370.0" x2="1175.0" y2="340.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1175.0" y="332.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<line x1="1175.0" y1="450.0" x2="1175.0" y2="480.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1175.0" y="496.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<rect x="1310" y="370" width="150" height="80" rx="10" fill="#0072B2" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="1385.0" y="406.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">ffnStage</text>
+<text x="1385.0" y="426.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 2, col 6</text>
+<line x1="1385.0" y1="370.0" x2="1385.0" y2="340.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1385.0" y="332.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<line x1="1385.0" y1="450.0" x2="1385.0" y2="480.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1385.0" y="496.0" text-anchor="middle" font-size="10" fill="#333">south:2</text>
+<rect x="50" y="510" width="150" height="80" rx="10" fill="#D55E00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="125.0" y="546.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">outputStage</text>
+<text x="125.0" y="566.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 3, col 0</text>
+<line x1="125.0" y1="510.0" x2="125.0" y2="480.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="125.0" y="472.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<rect x="260" y="510" width="150" height="80" rx="10" fill="#D55E00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="335.0" y="546.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">outputStage</text>
+<text x="335.0" y="566.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 3, col 1</text>
+<line x1="335.0" y1="510.0" x2="335.0" y2="480.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="335.0" y="472.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<rect x="470" y="510" width="150" height="80" rx="10" fill="#D55E00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="545.0" y="546.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">outputStage</text>
+<text x="545.0" y="566.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 3, col 2</text>
+<line x1="545.0" y1="510.0" x2="545.0" y2="480.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="545.0" y="472.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<rect x="680" y="510" width="150" height="80" rx="10" fill="#D55E00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="755.0" y="546.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">outputStage</text>
+<text x="755.0" y="566.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 3, col 3</text>
+<line x1="755.0" y1="510.0" x2="755.0" y2="480.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="755.0" y="472.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<rect x="890" y="510" width="150" height="80" rx="10" fill="#D55E00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="965.0" y="546.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">outputStage</text>
+<text x="965.0" y="566.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 3, col 4</text>
+<line x1="965.0" y1="510.0" x2="965.0" y2="480.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="965.0" y="472.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<rect x="1100" y="510" width="150" height="80" rx="10" fill="#D55E00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="1175.0" y="546.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">outputStage</text>
+<text x="1175.0" y="566.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 3, col 5</text>
+<line x1="1175.0" y1="510.0" x2="1175.0" y2="480.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1175.0" y="472.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<rect x="1310" y="510" width="150" height="80" rx="10" fill="#D55E00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="1385.0" y="546.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">outputStage</text>
+<text x="1385.0" y="566.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 3, col 6</text>
+<line x1="1385.0" y1="510.0" x2="1385.0" y2="480.0" stroke="#333" stroke-dasharray="3,3" stroke-width="1.5"/>
+<text x="1385.0" y="472.0" text-anchor="middle" font-size="10" fill="#333">north:0</text>
+<rect x="50" y="650" width="150" height="80" rx="10" fill="#CC79A7" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="125.0" y="686.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
+<text x="125.0" y="706.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 4, col 0</text>
+<rect x="260" y="650" width="150" height="80" rx="10" fill="#CC79A7" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="335.0" y="686.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
+<text x="335.0" y="706.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 4, col 1</text>
+<rect x="470" y="650" width="150" height="80" rx="10" fill="#CC79A7" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="545.0" y="686.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
+<text x="545.0" y="706.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 4, col 2</text>
+<rect x="680" y="650" width="150" height="80" rx="10" fill="#CC79A7" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="755.0" y="686.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
+<text x="755.0" y="706.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 4, col 3</text>
+<rect x="890" y="650" width="150" height="80" rx="10" fill="#CC79A7" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="965.0" y="686.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
+<text x="965.0" y="706.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 4, col 4</text>
+<rect x="1100" y="650" width="150" height="80" rx="10" fill="#CC79A7" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="1175.0" y="686.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
+<text x="1175.0" y="706.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 4, col 5</text>
+<rect x="1310" y="650" width="150" height="80" rx="10" fill="#CC79A7" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="1385.0" y="686.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
+<text x="1385.0" y="706.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 4, col 6</text>
+<rect x="50" y="790" width="150" height="80" rx="10" fill="#CC79A7" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="125.0" y="826.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
+<text x="125.0" y="846.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 5, col 0</text>
+<rect x="260" y="790" width="150" height="80" rx="10" fill="#CC79A7" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="335.0" y="826.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
+<text x="335.0" y="846.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 5, col 1</text>
+<rect x="470" y="790" width="150" height="80" rx="10" fill="#CC79A7" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="545.0" y="826.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
+<text x="545.0" y="846.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 5, col 2</text>
+<rect x="680" y="790" width="150" height="80" rx="10" fill="#CC79A7" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="755.0" y="826.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
+<text x="755.0" y="846.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 5, col 3</text>
+<rect x="890" y="790" width="150" height="80" rx="10" fill="#CC79A7" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="965.0" y="826.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
+<text x="965.0" y="846.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 5, col 4</text>
+<rect x="1100" y="790" width="150" height="80" rx="10" fill="#CC79A7" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="1175.0" y="826.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
+<text x="1175.0" y="846.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 5, col 5</text>
+<rect x="1310" y="790" width="150" height="80" rx="10" fill="#CC79A7" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
+<text x="1385.0" y="826.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
+<text x="1385.0" y="846.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 5, col 6</text>
+<text x="50" y="894" font-size="11" fill="#555">Legend:</text>
+<rect x="110" y="884" width="12" height="12" rx="2" fill="#E69F00"/>
+<text x="126" y="894" font-size="11" fill="#333">embedStage</text>
+<rect x="236" y="884" width="12" height="12" rx="2" fill="#56B4E9"/>
+<text x="252" y="894" font-size="11" fill="#333">attnController</text>
+<rect x="398" y="884" width="12" height="12" rx="2" fill="#009E73"/>
+<text x="414" y="894" font-size="11" fill="#333">attnRelay</text>
+<rect x="515" y="884" width="12" height="12" rx="2" fill="#F0E442"/>
+<text x="531" y="894" font-size="11" fill="#333">attnRowEnd</text>
+<rect x="641" y="884" width="12" height="12" rx="2" fill="#0072B2"/>
+<text x="657" y="894" font-size="11" fill="#333">ffnStage</text>
+<rect x="749" y="884" width="12" height="12" rx="2" fill="#D55E00"/>
+<text x="765" y="894" font-size="11" fill="#333">outputStage</text>
+<rect x="884" y="884" width="12" height="12" rx="2" fill="#CC79A7"/>
+<text x="900" y="894" font-size="11" fill="#333">idle</text>
 </svg>
