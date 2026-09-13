@@ -802,9 +802,11 @@ func main() {
 }
 
 // TestPlacedCallSiteIfElseLeaves checks that a placed-par clause may
-// dispatch between two different placed calls via if/else (the shape
-// examples 19-21's own `default { if r == 0 { relay() } else { idle() } }`
-// idiom needs), each leaf with its own independent place bindings.
+// dispatch between two different placed calls via if/else -- still a
+// valid shape (each leaf independently validated and given its own
+// place bindings) even though examples 20/21 no longer need it
+// themselves, having moved to explicit `processor(R, *)` wildcard
+// clauses instead of branching inside one catch-all.
 func TestPlacedCallSiteIfElseLeaves(t *testing.T) {
 	src := []byte(`package main
 

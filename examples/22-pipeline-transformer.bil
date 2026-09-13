@@ -50,16 +50,16 @@
 // every row but 0 idle.
 //
 // Placement: every role below is declared with a `processor(...)`
-// clause, no `default` at all. `processor(1, 0)`/`processor(1, cols-1)`
-// still name the attention row's two exact endpoints, but every other
-// role is a wildcard: `processor(0, *)` is "every column of row 0",
-// `processor(*, *)` last is "every node nothing else matched" -- the
-// same thing an explicit `default` clause means, just spelled
+// clause -- there is no separate `default` construct; it was removed
+// as exactly, only ever, a third spelling of the fully-wild wildcard
+// forms below. `processor(1, 0)`/`processor(1, cols-1)` still name the
+// attention row's two exact endpoints, but every other role is a
+// wildcard: `processor(0, *)` is "every column of row 0",
+// `processor(*, *)` last is "every node nothing else matched," spelled
 // consistently with the rest of the block instead of as a special
-// case. bilc requires whichever fully-wild clause is present (`default`
-// or `processor(*, *)`) to be last, for the same reason a `default`
-// already had to be: it's an identity gate, so nothing after it could
-// ever be reached.
+// case. bilc requires whichever fully-wild clause is present
+// (`processor(*)` or `processor(*, *)`) to be last: it's an identity
+// gate, so nothing after it could ever be reached.
 //
 // Channels: `place NAME at link[EXPR]` lives in the clause that calls a
 // proc, not inside the proc's own body -- it binds one of that proc's

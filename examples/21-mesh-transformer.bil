@@ -388,7 +388,7 @@ proc idle() {
 }
 
 func main() {
-	r, cols := bilink.Row(), bilink.NumCols()
+	cols := bilink.NumCols()
 
 	placed par {
 		processor(0, 0) {
@@ -401,16 +401,15 @@ func main() {
 			place fromWest at link[3]
 			rowEnd(toWest, fromWest)
 		}
-		default {
-			if r == 0 {
-				place fromEast at link[1]
-				place toWest at link[3]
-				place fromWest at link[3]
-				place toEast at link[1]
-				relay(fromEast, toWest, fromWest, toEast)
-			} else {
-				idle()
-			}
+		processor(0, *) {
+			place fromEast at link[1]
+			place toWest at link[3]
+			place fromWest at link[3]
+			place toEast at link[1]
+			relay(fromEast, toWest, fromWest, toEast)
+		}
+		processor(*, *) {
+			idle()
 		}
 	}
 }
