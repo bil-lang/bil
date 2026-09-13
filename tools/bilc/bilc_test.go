@@ -692,6 +692,7 @@ func main() {
 	}
 	got := string(m)
 	for _, want := range []string{
+		`"transport": "message-channel"`,
 		`"row": "0"`,
 		`"col": "0"`,
 		`"proc": "controller"`,

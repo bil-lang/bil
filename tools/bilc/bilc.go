@@ -3059,6 +3059,17 @@ func DeployManifest(filename string, src []byte) ([]byte, error) {
 		Proc       string            `json:"proc"`
 		Binds      map[string]string `json:"binds,omitempty"`
 	}
+	// transport names which boot-cascade mechanism a host should use to
+	// deliver these role binaries -- "message-channel" is the only one
+	// implemented today (see this feature's plan); naming it here, rather
+	// than only ever having one implicit host implementation, is what
+	// lets a future non-WASM target (e.g. a real link-addressed target
+	// using a chunked-over-link[0] transport, named "link-chunked") be
+	// added without changing this manifest's shape.
+	type jsonManifest struct {
+		Transport string     `json:"transport"`
+		Leaves    []jsonLeaf `json:"leaves"`
+	}
 
 	out := make([]jsonLeaf, 0, len(leaves))
 	for _, leaf := range leaves {
@@ -3077,7 +3088,7 @@ func DeployManifest(filename string, src []byte) ([]byte, error) {
 		}
 		out = append(out, jsonLeaf{Match: m, Conditions: conds, Proc: leaf.callee, Binds: leaf.binds})
 	}
-	return json.MarshalIndent(out, "", "  ")
+	return json.MarshalIndent(jsonManifest{Transport: "message-channel", Leaves: out}, "", "  ")
 }
 
 func Transform(filename string, src []byte) ([]byte, error) {
