@@ -340,24 +340,15 @@ proc relay(cols int) {
 		myTok := (c + gen) % vocabSize
 
 		for r := cols - 1; r >= 1; r-- {
-			// Arrow ops (`->`/`<-`) are only recognized as a whole
-			// statement right at a statement start (see bilc's
-			// isStmtStart) — a `case ...:` label doesn't count, only
-			// the `{` that opens a block does, hence the explicit
-			// block wrapping each case body below.
 			switch {
 			case r == c:
-				{
-					time.Sleep(hopDelay)
-					westLink <- int32(myTok)
-				}
+				time.Sleep(hopDelay)
+				westLink <- int32(myTok)
 			case r > c:
-				{
-					var v int32
-					eastLink -> v
-					time.Sleep(hopDelay)
-					westLink <- v
-				}
+				var v int32
+				eastLink -> v
+				time.Sleep(hopDelay)
+				westLink <- v
 			}
 		}
 
@@ -366,16 +357,12 @@ proc relay(cols int) {
 		for s := 1; s < cols; s++ {
 			switch {
 			case s == c:
-				{
-					westLink -> predicted
-				}
+				westLink -> predicted
 			case s > c:
-				{
-					var v int32
-					westLink -> v
-					time.Sleep(hopDelay)
-					eastLink <- v
-				}
+				var v int32
+				westLink -> v
+				time.Sleep(hopDelay)
+				eastLink <- v
 			}
 		}
 

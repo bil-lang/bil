@@ -1023,10 +1023,61 @@ func (t *transformer) parsePrimaryExpr(lo, hi int) (end int, ok bool) {
 }
 
 // isStmtStart reports whether token index i begins a new statement: either
-// the very first token, or the token right after a statement separator (the
-// `;` go/scanner auto-inserts at line ends, or a block-opening `{`).
+// the very first token, the token right after a statement separator (the
+// `;` go/scanner auto-inserts at line ends, or a block-opening `{`), or the
+// token right after a `case ...:`/`default:` clause header — a bare
+// `switch { case r == c:` colon doesn't get go/scanner's own semicolon
+// treatment the way a block-opening `{` does, so without this an arrow op
+// (`->`/`<-`) as a case's *first* statement was invisible to
+// matchArrowReceive/matchLinkSend/matchPlaceAliasDecl, forcing an
+// otherwise-unnecessary `{ }` wrapper around the case body just to give it
+// a preceding `{` to be recognized after (see caseOrDefaultColon).
 func (t *transformer) isStmtStart(i int) bool {
-	return i == 0 || t.toks[i-1].tok == token.SEMICOLON || t.toks[i-1].tok == token.LBRACE
+	if i == 0 {
+		return true
+	}
+	switch t.toks[i-1].tok {
+	case token.SEMICOLON, token.LBRACE:
+		return true
+	case token.COLON:
+		return t.caseOrDefaultColon(i - 1)
+	}
+	return false
+}
+
+// caseOrDefaultColon reports whether the COLON token at index i closes a
+// `case ...:` or `default:` clause header (switch or select), as opposed to
+// an unrelated colon that also lexes as one — a slice/index expression
+// (`a[1:2]`), a composite-literal field (`Point{X: 1}`), or a label
+// statement (`Loop:`). Scans backward from i tracking bracket/paren/brace
+// depth: a closer (`)`/`]`/`}`) seen from this side bumps depth so whatever
+// it closes is skipped transparently (letting a case expression like
+// `case f(Point{X: 1}):` scan straight through it); an *unmatched* opener
+// or a SEMICOLON at depth 0 means the colon belongs to something else,
+// encountered before any `case`/`default` keyword was found, so it isn't a
+// case-clause colon after all.
+func (t *transformer) caseOrDefaultColon(i int) bool {
+	depth := 0
+	for j := i - 1; j >= 0; j-- {
+		switch t.toks[j].tok {
+		case token.RPAREN, token.RBRACK, token.RBRACE:
+			depth++
+		case token.LPAREN, token.LBRACK, token.LBRACE:
+			if depth == 0 {
+				return false
+			}
+			depth--
+		case token.SEMICOLON:
+			if depth == 0 {
+				return false
+			}
+		case token.CASE, token.DEFAULT:
+			if depth == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // matchArrowReceive recognizes `c -> x` or `c :-> x` as a whole statement —
