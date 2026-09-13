@@ -31,6 +31,14 @@
 // column's prediction: for s = 1..cols-1, the controller sends
 // prediction s east, and it walks the same relay chain forwards until
 // it reaches column s. See `runTransformer` for the actual model.
+//
+// `place NAME at link[EXPR]` lives in `main()`'s `placed par` clauses,
+// not inside controller/rowEnd/relay's own bodies (see Example 20):
+// each proc below only ever declares and uses ordinary directional
+// channel parameters -- no `place`/`link` anywhere in them. Gather and
+// scatter run in opposite directions over the same two physical links,
+// so each link becomes two directional parameters (one per direction),
+// both `place`d onto the same link index in main().
 
 package main
 
@@ -271,8 +279,8 @@ func runTransformer(tokens []int) []int {
 // controller runs at exactly one processor, (0,0): gathers every row-0
 // column's token, runs the transformer block once the whole row has
 // arrived, then scatters each column's prediction back out.
-proc controller(cols int) {
-	place eastLink at link[1]
+proc controller(toEast chan<- int32, fromEast <-chan int32) {
+	cols := bilink.NumCols()
 	bilink.Screenf("controller ready, %d cols", cols)
 
 	for gen := 0; gen < generations; gen++ {
@@ -282,7 +290,7 @@ proc controller(cols int) {
 		for r := cols - 1; r >= 1; r-- {
 			time.Sleep(hopDelay)
 			var v int32
-			eastLink -> v
+			fromEast -> v
 			tokens[r] = int(v)
 		}
 
@@ -290,7 +298,7 @@ proc controller(cols int) {
 
 		for s := 1; s < cols; s++ {
 			time.Sleep(hopDelay)
-			eastLink <- int32(predicted[s])
+			toEast <- int32(predicted[s])
 		}
 
 		bilink.Screenf("gen %d: in=%q out=%q", gen, wordAt(tokens[0]), wordAt(predicted[0]))
@@ -305,18 +313,17 @@ proc controller(cols int) {
 // destination for exactly one scatter round -- everything else about
 // gather/scatter happens strictly west of it, so unlike relay it
 // needs no round loop at all.
-proc rowEnd(cols int) {
-	place westLink at link[3]
-	c := cols - 1
+proc rowEnd(toWest chan<- int32, fromWest <-chan int32) {
+	c := bilink.NumCols() - 1
 	bilink.Screenf("row-end ready at col %d", c)
 
 	for gen := 0; gen < generations; gen++ {
 		myTok := (c + gen) % vocabSize
 		time.Sleep(hopDelay)
-		westLink <- int32(myTok)
+		toWest <- int32(myTok)
 
 		var predicted int32
-		westLink -> predicted
+		fromWest -> predicted
 		bilink.Screenf("gen %d: %q -> %q", gen, wordAt(myTok), wordAt(int(predicted)))
 	}
 
@@ -329,10 +336,11 @@ proc rowEnd(cols int) {
 // is further east it forwards (recv east, send west); otherwise that
 // round isn't on its path at all. Scatter mirrors this exactly,
 // flowing east instead of west. This is Example 20's relay idiom,
-// just run `cols-1` times per generation instead of once.
-proc relay(cols int) {
-	place westLink at link[3]
-	place eastLink at link[1]
+// just run `cols-1` times per generation instead of once. Both
+// physical links (east, west) are used in both directions across the
+// two phases, so each becomes a pair of directional parameters.
+proc relay(fromEast <-chan int32, toWest chan<- int32, fromWest <-chan int32, toEast chan<- int32) {
+	cols := bilink.NumCols()
 	c := bilink.Col()
 	bilink.Screenf("relay ready at col %d", c)
 
@@ -343,12 +351,12 @@ proc relay(cols int) {
 			switch {
 			case r == c:
 				time.Sleep(hopDelay)
-				westLink <- int32(myTok)
+				toWest <- int32(myTok)
 			case r > c:
 				var v int32
-				eastLink -> v
+				fromEast -> v
 				time.Sleep(hopDelay)
-				westLink <- v
+				toWest <- v
 			}
 		}
 
@@ -357,12 +365,12 @@ proc relay(cols int) {
 		for s := 1; s < cols; s++ {
 			switch {
 			case s == c:
-				westLink -> predicted
+				fromWest -> predicted
 			case s > c:
 				var v int32
-				westLink -> v
+				fromWest -> v
 				time.Sleep(hopDelay)
-				eastLink <- v
+				toEast <- v
 			}
 		}
 
@@ -384,14 +392,22 @@ func main() {
 
 	placed par {
 		processor(0, 0) {
-			controller(cols)
+			place toEast at link[1]
+			place fromEast at link[1]
+			controller(toEast, fromEast)
 		}
 		processor(0, cols-1) {
-			rowEnd(cols)
+			place toWest at link[3]
+			place fromWest at link[3]
+			rowEnd(toWest, fromWest)
 		}
 		default {
 			if r == 0 {
-				relay(cols)
+				place fromEast at link[1]
+				place toWest at link[3]
+				place fromWest at link[3]
+				place toEast at link[1]
+				relay(fromEast, toWest, fromWest, toEast)
 			} else {
 				idle()
 			}

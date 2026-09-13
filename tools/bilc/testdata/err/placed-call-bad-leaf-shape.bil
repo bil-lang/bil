@@ -1,0 +1,14 @@
+package main
+
+proc idle() {
+	println("idle")
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			idle()
+			idle()
+		}
+	}
+}

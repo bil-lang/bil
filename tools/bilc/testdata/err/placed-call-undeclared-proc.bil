@@ -1,0 +1,9 @@
+package main
+
+func main() {
+	placed par {
+		processor(0) {
+			ghost()
+		}
+	}
+}

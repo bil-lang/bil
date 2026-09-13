@@ -1,11 +1,15 @@
 package main
 
-proc controller() {
-	place link at link[0]
+proc controller(east chan int32) {
 	var v int32
-	link -> v
+	east -> v
 }
 
 func main() {
-	controller()
+	placed par {
+		processor(0) {
+			place link at link[0]
+			controller(link)
+		}
+	}
 }

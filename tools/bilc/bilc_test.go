@@ -3,6 +3,7 @@ package bilc
 import (
 	"bytes"
 	"fmt"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -371,6 +372,10 @@ proc controller() {
 	println("controller")
 }
 
+proc idle() {
+	println("default")
+}
+
 func main() {
 	c := make(chan int)
 	par {
@@ -387,7 +392,7 @@ func main() {
 			controller()
 		}
 		default {
-			println("default")
+			idle()
 		}
 	}
 }
@@ -405,23 +410,33 @@ func main() {
 	}
 }
 
-// TestPlaceAliasRewrite mirrors TestLinkRewrite: an alias declared via
-// `place NAME at link[EXPR]` is used for both a receive and a send, and
-// the alias declaration itself, plus every trace of the alias name, is
-// gone from the output — resolved straight to the link index it stands
-// for, exactly as if `link[EXPR]` had been written directly.
+// TestPlaceAliasRewrite mirrors TestLinkRewrite, but for the call-site
+// form: `place NAME at link[EXPR]` now lives in the placed-par clause that
+// calls the proc, binding one of its own declared directional channel
+// parameters -- toEast/fromEast here -- rather than minting a name inside
+// the proc's own body. The proc itself never mentions `place`/`link` at
+// all; every trace of the call-site's local place names (toEast/fromEast)
+// is gone from the output too, resolved straight to the link indices they
+// stood for, exactly as if the proc's own body had `link[east]` written
+// directly -- and the callee's own parameter names (in, out) are what
+// survive into the emitted bilink calls.
 func TestPlaceAliasRewrite(t *testing.T) {
 	src := []byte(`package main
 
-proc node() {
-	place toEast at link[east]
+proc node(in <-chan int32, out chan<- int32) {
 	var v int32
-	toEast -> v
-	toEast <- v
+	in -> v
+	out <- v
 }
 
 func main() {
-	node()
+	placed par {
+		processor(0) {
+			place toEast at link[east]
+			place fromEast at link[east]
+			node(fromEast, toEast)
+		}
+	}
 }
 `)
 	out, err := Transform("test.bil", src)
@@ -430,13 +445,16 @@ func main() {
 	}
 	got := string(out)
 	if !strings.Contains(got, "v = bilink.Recv(east)") {
-		t.Errorf("expected `toEast -> v` to rewrite to `v = bilink.Recv(east)`, got:\n%s", got)
+		t.Errorf("expected `in -> v` to rewrite to `v = bilink.Recv(east)`, got:\n%s", got)
 	}
 	if !strings.Contains(got, "bilink.Send(east, v)") {
-		t.Errorf("expected `toEast <- v` to rewrite to `bilink.Send(east, v)`, got:\n%s", got)
+		t.Errorf("expected `out <- v` to rewrite to `bilink.Send(east, v)`, got:\n%s", got)
 	}
-	if strings.Contains(got, "toEast") {
-		t.Errorf("expected the alias declaration and every use of it to be rewritten away, got:\n%s", got)
+	if strings.Contains(got, "toEast") || strings.Contains(got, "fromEast") {
+		t.Errorf("expected the place declarations and every call-site use of their names to be rewritten away, got:\n%s", got)
+	}
+	if !strings.Contains(got, "node(nil, nil)") {
+		t.Errorf("expected the placed call's channel arguments to become nil, got:\n%s", got)
 	}
 	if !strings.Contains(got, `import "emulator/nodeprog/bilink"`) {
 		t.Errorf("expected the bilink import to be auto-injected, got:\n%s", got)
@@ -446,38 +464,46 @@ func main() {
 // TestPlacementManifest exercises the topology manifest against a fixture
 // using both `processor` arities plus a `default` (with an if/else body,
 // so it's recorded with no `proc:` line — see PlacementManifest's own
-// doc comment for why that's correct, not a gap) and two `place` aliases,
-// and confirms an ordinary (non-`placed par`) file gets no manifest at
-// all rather than an empty one.
+// doc comment for why that's correct, not a gap) and two placed call
+// sites, and confirms an ordinary (non-`placed par`) file gets no manifest
+// at all rather than an empty one. The `links: aliases:` section is keyed
+// by each callee's own parameter name (toEast, toWest), not by the
+// call-site's local place name — see PlacementManifest's own doc comment.
 func TestPlacementManifest(t *testing.T) {
 	src := []byte(`package main
 
-proc controller(cols int) {
-	place toEast at link[1]
-	var v int32
-	toEast -> v
+proc controller(toEast chan<- int32) {
+	toEast <- 1
 }
 
-proc rowEnd() {
-	place toWest at link[3]
-	var v int32
-	toWest -> v
+proc rowEnd(toWest chan<- int32) {
+	toWest <- 1
+}
+
+proc relay() {
+	println("relay")
+}
+
+proc idle() {
+	println("idle")
 }
 
 func main() {
 	r, cols := 0, 4
 	placed par {
 		processor(0, 0) {
-			controller(cols)
+			place toEast at link[1]
+			controller(toEast)
 		}
 		processor(0, cols-1) {
-			rowEnd()
+			place toWest at link[3]
+			rowEnd(toWest)
 		}
 		default {
 			if r == 0 {
-				println("relay")
+				relay()
 			} else {
-				println("idle")
+				idle()
 			}
 		}
 	}
@@ -503,7 +529,7 @@ func main() {
 	}
 	// default's body is an if/else, not a single call -- it must not be
 	// credited with a resolved proc name it doesn't actually have.
-	if strings.Contains(got, "proc: println") {
+	if strings.Contains(got, "proc: relay") || strings.Contains(got, "proc: idle") {
 		t.Errorf("expected default's unresolved if/else body to have no proc: line, got:\n%s", got)
 	}
 
@@ -519,6 +545,152 @@ func main() {
 	}
 	if m2 != nil {
 		t.Errorf("expected nil manifest for a file with no placed par block, got:\n%s", m2)
+	}
+}
+
+// TestPlacedCallSiteConstantParam checks that a placed-callable proc may
+// take a genuine compile-time-constant parameter (a literal, or a
+// reference to a package-level const) alongside its channel parameters --
+// the constant's source text is copied through unchanged at the call
+// site, while the channel argument still becomes nil.
+func TestPlacedCallSiteConstantParam(t *testing.T) {
+	src := []byte(`package main
+
+const rounds = 3
+
+proc controller(n int, toEast chan<- int32) {
+	for i := 0; i < n; i++ {
+		toEast <- int32(i)
+	}
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place toEast at link[1]
+			controller(rounds, toEast)
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "controller(rounds, nil)") {
+		t.Errorf("expected the constant argument to pass through and the channel argument to become nil, got:\n%s", got)
+	}
+	if !strings.Contains(got, "bilink.Send(1, int32(i))") {
+		t.Errorf("expected `toEast <- int32(i)` to rewrite to `bilink.Send(1, int32(i))`, got:\n%s", got)
+	}
+}
+
+// TestPlacedCallSiteIfElseLeaves checks that a placed-par clause may
+// dispatch between two different placed calls via if/else (the shape
+// examples 19-21's own `default { if r == 0 { relay() } else { idle() } }`
+// idiom needs), each leaf with its own independent place bindings.
+func TestPlacedCallSiteIfElseLeaves(t *testing.T) {
+	src := []byte(`package main
+
+proc relay(in <-chan int32, out chan<- int32) {
+	var v int32
+	in -> v
+	out <- v
+}
+
+proc idle() {
+	println("idle")
+}
+
+func main() {
+	r := 0
+	placed par {
+		default {
+			if r == 0 {
+				place in at link[3]
+				place out at link[1]
+				relay(in, out)
+			} else {
+				idle()
+			}
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		// "if" and its condition land on separate lines: the condition is
+		// re-run through t.transform, which resyncs with its own `//line`
+		// directive per source line (see resync in bilc.go) -- checked
+		// separately rather than as one adjacent substring for that reason.
+		"if\n",
+		"r == 0 {",
+		"relay(nil, nil)",
+		"v = bilink.Recv(3)",
+		"bilink.Send(1, v)",
+		"} else {",
+		"idle()",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, got)
+		}
+	}
+}
+
+// TestIsConstExpr exercises isConstExpr's whitelist directly: literals and
+// references to a package-level const must pass; a variable reference, a
+// call/conversion shape, and a selector must all fail.
+func TestIsConstExpr(t *testing.T) {
+	src := []byte(`package main
+
+const rounds = 3
+
+func main() {
+	x := rounds + 1*2
+	y := bilink.NumCols()
+	z := rounds
+	w := pkg.Const
+}
+`)
+	tr := tokenize("test.bil", src)
+	constNames := tr.collectTopLevelConstNames()
+	if !constNames["rounds"] {
+		t.Fatalf("expected 'rounds' to be collected as a top-level const")
+	}
+
+	// Locate each RHS by its DEFINE token (`x :=`, `y :=`, ...) and run to
+	// the following SEMICOLON.
+	rhsFor := func(name string) (lo, hi int) {
+		for i, tk := range tr.toks {
+			if tk.tok == token.IDENT && tk.lit == name && i+1 < len(tr.toks) && tr.toks[i+1].tok == token.DEFINE {
+				lo = i + 2
+				for j := lo; j < len(tr.toks); j++ {
+					if tr.toks[j].tok == token.SEMICOLON {
+						return lo, j
+					}
+				}
+			}
+		}
+		t.Fatalf("could not find %q :=", name)
+		return 0, 0
+	}
+
+	if lo, hi := rhsFor("x"); !tr.isConstExpr(lo, hi, constNames) {
+		t.Errorf("expected `rounds + 1*2` to be a const expr")
+	}
+	if lo, hi := rhsFor("y"); tr.isConstExpr(lo, hi, constNames) {
+		t.Errorf("expected `bilink.NumCols()` to NOT be a const expr")
+	}
+	if lo, hi := rhsFor("z"); !tr.isConstExpr(lo, hi, constNames) {
+		t.Errorf("expected `rounds` to be a const expr")
+	}
+	if lo, hi := rhsFor("w"); tr.isConstExpr(lo, hi, constNames) {
+		t.Errorf("expected `pkg.Const` to NOT be a const expr")
 	}
 }
 

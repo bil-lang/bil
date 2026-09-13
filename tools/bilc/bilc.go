@@ -223,13 +223,24 @@ type transformer struct {
 	usedLink      bool // set when a `link[...]` send or receive is rewritten
 	usedPlacement bool // set when a `placed par` block is rewritten
 
-	// placeAliases holds every `place NAME at link[EXPR]` declaration's
-	// scope, collected by collectPlaceAliases before transform() runs.
-	// Scoped per enclosing proc/func body, not file-global -- placement
-	// makes multiple distinct, differently-roled procs normal in one
-	// file, and a file-global alias table would force artificial
-	// cross-proc name uniqueness.
+	// placeAliases holds, per placed-callable proc, the link-index binding
+	// for each of its own channel parameters -- collected by
+	// collectPlacedCallSites (from `place NAME at link[EXPR]` statements in
+	// the placed-par clause that calls the proc, not from anything inside
+	// the proc's own body) before transform() runs. Scoped per callee
+	// proc/func body, not file-global -- placement makes multiple distinct,
+	// differently-roled procs normal in one file, and a file-global alias
+	// table would force artificial cross-proc name uniqueness. Keyed by the
+	// callee's own parameter names, never the call site's local place
+	// names, so matchLinkReceive/matchLinkSend/resolvePlaceAlias need no
+	// knowledge of where a binding came from.
 	placeAliases []placeAliasScope
+
+	// funcBodyByName indexes every top-level proc/func by name, built once
+	// by buildFuncBodyIndex -- collectPlacedCallSites and
+	// emitPlacedCallLeaf both need to look up a placed-called proc's own
+	// parameter list and body range by name.
+	funcBodyByName map[string]funcBodyRange
 }
 
 // placeAliasScope is one proc/func body's `place`-alias table: NAME ->
@@ -1127,11 +1138,14 @@ func (t *transformer) matchArrowReceive(lo, hi int) (rhsLo, rhsHi, lhsEnd int, k
 	return rhsLo, rhsHi, lhsEnd, kind, okSrc, hasOk, matchEnd, isCall, true
 }
 
-// funcBodyRange is one named top-level `proc`/`func` declaration's name
-// and body token range, as found by collectFuncBodyRanges.
+// funcBodyRange is one named top-level `proc`/`func` declaration's name,
+// parameter-list token range (the tokens between its parens -- what
+// paramNamesAndDirections/classifyChanType need), and body token range, as
+// found by collectFuncBodyRanges.
 type funcBodyRange struct {
-	name           string
-	bodyLo, bodyHi int
+	name               string
+	paramsLo, paramsHi int
+	bodyLo, bodyHi     int
 }
 
 // collectFuncBodyRanges finds every named top-level `proc`/`func`
@@ -1160,80 +1174,420 @@ func (t *transformer) collectFuncBodyRanges() (ranges []funcBodyRange) {
 		}
 		bodyOpen := parenClose + 1
 		bodyClose := matchBrace(toks, bodyOpen)
-		ranges = append(ranges, funcBodyRange{name: toks[i+1].lit, bodyLo: bodyOpen + 1, bodyHi: bodyClose})
+		ranges = append(ranges, funcBodyRange{name: toks[i+1].lit, paramsLo: i + 3, paramsHi: parenClose, bodyLo: bodyOpen + 1, bodyHi: bodyClose})
 	}
 	return ranges
 }
 
-// collectPlaceAliases scans every proc/func body range (collectFuncBodyRanges)
-// for `place NAME at link[EXPR]` declarations, building each body's own
-// alias table (t.placeAliases) — scoped per body, not file-global, since
-// placement makes multiple distinct, differently-roled procs normal in
-// one file and a file-global table would force artificial cross-proc name
-// uniqueness. Run once, early in Transform(), before transform() itself
-// (which calls matchPlaceAliasDecl to erase the declaration from the
-// output, and matchLinkReceive/matchLinkSend to resolve alias uses via
-// resolvePlaceAlias) — mirroring the existing usedAltN/usedSplitN2D
-// prescan's own timing. Rejects an alias literally named `link` (it would
-// silently and confusingly shadow the real thing) or declared twice in
-// the same scope, right here rather than as a separate pass, since this
-// scan already visits every declaration in order and duplicate detection
-// falls out for free; checkPlaceAliasNames handles the one rule that
-// needs whole-file information instead (collision with a proc/func name).
-func (t *transformer) collectPlaceAliases() error {
+// buildFuncBodyIndex populates t.funcBodyByName from collectFuncBodyRanges
+// -- run once, early, by both Transform and PlacementManifest, before
+// anything that needs to look up a placed-called proc's parameter list or
+// body range by name.
+func (t *transformer) buildFuncBodyIndex() {
+	t.funcBodyByName = map[string]funcBodyRange{}
 	for _, br := range t.collectFuncBodyRanges() {
-		lo, hi := br.bodyLo, br.bodyHi
-		var aliases map[string]string
-		for i := lo; i < hi; i++ {
-			if !(t.toks[i].tok == token.IDENT && t.toks[i].lit == "place" &&
-				i+1 < hi && t.toks[i+1].tok == token.IDENT &&
-				i+2 < hi && t.toks[i+2].tok == token.IDENT && t.toks[i+2].lit == "at" &&
-				i+3 < hi && t.toks[i+3].tok == token.IDENT && t.toks[i+3].lit == "link" &&
-				i+4 < hi && t.toks[i+4].tok == token.LBRACK) {
-				continue
-			}
-			name := t.toks[i+1].lit
-			open := i + 4
-			close := matchBracket(t.toks, open)
-			idxExpr := strings.TrimSpace(string(t.src[t.off(t.toks[open+1].pos):t.off(t.toks[close].pos)]))
-			if name == "link" {
-				return fmt.Errorf("%s: place alias %q may not shadow the reserved `link` identifier", t.file.Position(t.toks[i].pos), name)
-			}
-			if aliases == nil {
-				aliases = make(map[string]string)
-			}
-			if _, dup := aliases[name]; dup {
-				return fmt.Errorf("%s: place alias %q declared more than once in the same scope", t.file.Position(t.toks[i].pos), name)
-			}
-			aliases[name] = idxExpr
+		t.funcBodyByName[br.name] = br
+	}
+}
+
+// parsePlaceDecl parses one `place NAME at link[EXPR]` statement at a
+// statement start (lo must satisfy isStmtStart), bounded by hi. Shared by
+// checkPlaceOnlyInsidePlacedPar (detecting the shape anywhere in the file)
+// and parsePlacedCallLeaf (requiring and extracting it inside a placed-par
+// clause leaf) — replaces the standalone matchPlaceAliasDecl this file used
+// to have back when `place` could legally appear inside a proc's own body.
+func (t *transformer) parsePlaceDecl(lo, hi int) (name, idxExpr string, pos token.Pos, end int, ok bool) {
+	if !t.isStmtStart(lo) {
+		return "", "", 0, 0, false
+	}
+	if !(lo < hi && t.toks[lo].tok == token.IDENT && t.toks[lo].lit == "place" &&
+		lo+1 < hi && t.toks[lo+1].tok == token.IDENT &&
+		lo+2 < hi && t.toks[lo+2].tok == token.IDENT && t.toks[lo+2].lit == "at" &&
+		lo+3 < hi && t.toks[lo+3].tok == token.IDENT && t.toks[lo+3].lit == "link" &&
+		lo+4 < hi && t.toks[lo+4].tok == token.LBRACK) {
+		return "", "", 0, 0, false
+	}
+	name = t.toks[lo+1].lit
+	pos = t.toks[lo].pos
+	open := lo + 4
+	close := matchBracket(t.toks, open)
+	idxExpr = strings.TrimSpace(string(t.src[t.off(t.toks[open+1].pos):t.off(t.toks[close].pos)]))
+	return name, idxExpr, pos, close + 1, true
+}
+
+// checkPlaceOnlyInsidePlacedPar rejects any `place NAME at link[EXPR]`
+// statement (parsePlaceDecl-shaped, at a statement start) that doesn't fall
+// inside some `placed par { ... }` block's braces — the removed in-body
+// form (place used to live inside the very proc body it configured; now it
+// only ever lives in the placed-par clause that calls that proc — see
+// collectPlacedCallSites). Must run before collectPlacedCallSites: a
+// program still written in the old style calls a placed-callable proc with
+// the wrong shape entirely, so without this dedicated check first, the
+// errors collectPlacedCallSites would produce instead are confusing rather
+// than pointing at the real problem (a stray `place` sitting unrecognized
+// inside a proc's own body).
+func (t *transformer) checkPlaceOnlyInsidePlacedPar() error {
+	var placedSpans [][2]int
+	for i := 0; i+2 < len(t.toks); i++ {
+		if t.toks[i].tok == token.IDENT && t.toks[i].lit == "placed" &&
+			t.toks[i+1].tok == token.IDENT && t.toks[i+1].lit == "par" &&
+			t.toks[i+2].tok == token.LBRACE {
+			close := matchBrace(t.toks, i+2)
+			placedSpans = append(placedSpans, [2]int{i + 2, close})
 		}
-		if aliases != nil {
-			t.placeAliases = append(t.placeAliases, placeAliasScope{procName: br.name, bodyLo: lo, bodyHi: hi, aliases: aliases})
+	}
+	inside := func(i int) bool {
+		for _, span := range placedSpans {
+			if i > span[0] && i < span[1] {
+				return true
+			}
+		}
+		return false
+	}
+	for i := range t.toks {
+		if _, _, pos, _, ok := t.parsePlaceDecl(i, len(t.toks)); ok && !inside(i) {
+			return fmt.Errorf("%s: 'place' may only appear inside a placed-par clause, immediately before the proc call it configures — in-body place declarations are no longer supported; move it into the placed-par clause that calls this proc", t.file.Position(pos))
 		}
 	}
 	return nil
 }
 
-// checkPlaceAliasNames rejects a place alias that collides with any
-// top-level proc/func name in the file — the one place-alias-name rule
-// that needs whole-file information rather than falling out of
-// collectPlaceAliases' own single scoped pass (see its doc comment for
-// the other two). A stray reference to an alias name outside its scope
-// needs no check here — it passes through untouched and Go's own
-// compiler rejects it (`undefined: NAME`), the same fallback this file
-// relies on elsewhere (e.g. a wrong `link` index isn't validated either).
-func (t *transformer) checkPlaceAliasNames() error {
-	procNames := map[string]bool{}
+// topLevelProcFuncNames returns every top-level proc/func name in the
+// file, used by collectPlacedCallSites to reject a place binding whose
+// name collides with one.
+func (t *transformer) topLevelProcFuncNames() map[string]bool {
+	names := map[string]bool{}
 	for i := 0; i+1 < len(t.toks); i++ {
 		isProc := t.toks[i].tok == token.IDENT && t.toks[i].lit == "proc"
 		if (isProc || t.toks[i].tok == token.FUNC) && t.toks[i+1].tok == token.IDENT {
-			procNames[t.toks[i+1].lit] = true
+			names[t.toks[i+1].lit] = true
 		}
 	}
-	for _, scope := range t.placeAliases {
-		for name := range scope.aliases {
-			if procNames[name] {
-				return fmt.Errorf("place alias %q collides with a proc/func name", name)
+	return names
+}
+
+// collectTopLevelConstNames returns every package-level `const NAME =
+// EXPR` or grouped `const ( NAME = EXPR ... )` identifier, declared
+// outside any proc/func body — used by isConstExpr to recognize a named
+// constant reference in a placed call's argument. Multi-name comma
+// declarations (`const a, b = 1, 2`) are not collected; unsupported, and
+// unused by any example in this codebase.
+func (t *transformer) collectTopLevelConstNames() map[string]bool {
+	names := map[string]bool{}
+	bodies := t.collectFuncBodyRanges()
+	inBody := func(i int) bool {
+		for _, br := range bodies {
+			if i >= br.bodyLo && i < br.bodyHi {
+				return true
+			}
+		}
+		return false
+	}
+	for i := 0; i+1 < len(t.toks); i++ {
+		if t.toks[i].tok != token.CONST || inBody(i) {
+			continue
+		}
+		j := i + 1
+		if j < len(t.toks) && t.toks[j].tok == token.LPAREN {
+			close := matchParen(t.toks, j)
+			for k := j + 1; k < close; k++ {
+				if t.toks[k].tok == token.IDENT &&
+					(t.toks[k-1].tok == token.LPAREN || t.toks[k-1].tok == token.SEMICOLON) {
+					names[t.toks[k].lit] = true
+				}
+			}
+			continue
+		}
+		if j < len(t.toks) && t.toks[j].tok == token.IDENT {
+			names[t.toks[j].lit] = true
+		}
+	}
+	return names
+}
+
+// isConstExpr reports whether token range [lo,hi) is (conservatively) a
+// compile-time constant expression: every token must be a literal
+// (INT/FLOAT/IMAG/CHAR/STRING), one of the arithmetic/bitwise operators or
+// a paren used purely for grouping, or an IDENT that names a package-level
+// const (per constNames). An IDENT immediately followed by LPAREN is
+// always rejected outright regardless of whether it matches a const name
+// — that's a call or type-conversion shape (`int32(3)`, `bilink.NumCols()`),
+// never arithmetic, and must not slip through just because a const happens
+// to share that identifier. A PERIOD (selector — `pkg.Const`) or LBRACK
+// (indexing) anywhere immediately fails the whole range.
+//
+// This is a flat token-kind whitelist scan, not real expression-grammar
+// validation with precedence — deliberately: it can't tell `1 + +` from
+// `1 + 1`, but it doesn't need to, because Go's own compiler validates the
+// emitted arithmetic once transpiled (the same "can't fully verify, so let
+// go/format's error surface it" stance splitCommaExprs's own doc comment
+// already takes). What it reliably DOES reject, which is the whole point:
+// any variable reference, any function/method call, any selector into
+// another package, any index expression, any type conversion.
+func (t *transformer) isConstExpr(lo, hi int, constNames map[string]bool) bool {
+	if lo >= hi {
+		return false
+	}
+	for i := lo; i < hi; i++ {
+		switch t.toks[i].tok {
+		case token.INT, token.FLOAT, token.IMAG, token.CHAR, token.STRING:
+		case token.ADD, token.SUB, token.MUL, token.QUO, token.REM,
+			token.AND, token.OR, token.XOR, token.SHL, token.SHR, token.AND_NOT,
+			token.LPAREN, token.RPAREN:
+		case token.PERIOD, token.LBRACK:
+			return false
+		case token.IDENT:
+			if i+1 < hi && t.toks[i+1].tok == token.LPAREN {
+				return false // call or conversion, never arithmetic
+			}
+			if !constNames[t.toks[i].lit] {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// parseIfElseBranches parses one level of `if COND { THEN } else { ELSE }`
+// (or `else if ...`) at [lo,hi), skipping leading semicolons. Not
+// recursive itself — a caller wanting to walk an else-if chain calls it
+// again on elseLo (through hi) when elseIsIf is true. condLo/condHi bound
+// the condition's own token range (scanned up to the first depth-0 `{`,
+// tracking LPAREN/LBRACK depth so a condition like `f(x) > 0` doesn't end
+// the scan early). When elseIsIf, elseLo/elseHi bound that nested `if
+// ... { ... } [else ...]` construct's own full token range (from its own
+// `if` keyword through hi); otherwise they bound the else-block's `{...}`
+// interior. ok is false for any other shape, including a bodyless `if`
+// with no `else` at all — every reachable placed-par leaf must terminate
+// in a call, so that shape is incomplete dispatch, not silently accepted.
+func (t *transformer) parseIfElseBranches(lo, hi int) (condLo, condHi, thenLo, thenHi, elseLo, elseHi int, elseIsIf, ok bool) {
+	for lo < hi && t.toks[lo].tok == token.SEMICOLON {
+		lo++
+	}
+	if lo >= hi || t.toks[lo].tok != token.IF {
+		return
+	}
+	i := lo + 1
+	condLo = i
+	depth := 0
+	for i < hi {
+		switch t.toks[i].tok {
+		case token.LPAREN, token.LBRACK:
+			depth++
+		case token.RPAREN, token.RBRACK:
+			depth--
+		case token.LBRACE:
+			if depth == 0 {
+				goto foundBrace
+			}
+		}
+		i++
+	}
+	return
+foundBrace:
+	if i == condLo || i >= hi {
+		return 0, 0, 0, 0, 0, 0, false, false
+	}
+	condHi = i
+	thenClose := matchBrace(t.toks, i)
+	thenLo, thenHi = i+1, thenClose
+	j := thenClose + 1
+	for j < hi && t.toks[j].tok == token.SEMICOLON {
+		j++
+	}
+	if j >= hi || t.toks[j].tok != token.ELSE {
+		return 0, 0, 0, 0, 0, 0, false, false // no else -- incomplete dispatch
+	}
+	j++
+	if j < hi && t.toks[j].tok == token.IF {
+		return condLo, condHi, thenLo, thenHi, j, hi, true, true
+	}
+	if j >= hi || t.toks[j].tok != token.LBRACE {
+		return 0, 0, 0, 0, 0, 0, false, false
+	}
+	elseClose := matchBrace(t.toks, j)
+	return condLo, condHi, thenLo, thenHi, j + 1, elseClose, false, true
+}
+
+// placeDeclBinding is one `place NAME at link[EXPR]` statement parsed out
+// of a placed-par clause leaf, in source order.
+type placeDeclBinding struct {
+	name    string
+	idxExpr string
+	pos     token.Pos
+}
+
+// parsePlacedCallLeaf parses [lo,hi) — one reachable leaf of a placed-par
+// clause body (either the clause's whole body, or one if/else branch of
+// it) — as zero or more `place NAME at link[EXPR]` statements (via
+// parsePlaceDecl) immediately followed by exactly one call statement
+// `callee(args...)`, and nothing else. argRanges are the call's own
+// top-level comma-separated argument token ranges (splitCallArgs), in
+// declaration order, aligned with the callee's own declared parameters.
+func (t *transformer) parsePlacedCallLeaf(lo, hi int) (callee string, callPos token.Pos, argRanges [][2]int, placeDecls []placeDeclBinding, ok bool) {
+	i := lo
+	for i < hi && t.toks[i].tok == token.SEMICOLON {
+		i++
+	}
+	for i < hi {
+		name, idxExpr, pos, end, declOK := t.parsePlaceDecl(i, hi)
+		if !declOK {
+			break
+		}
+		placeDecls = append(placeDecls, placeDeclBinding{name: name, idxExpr: idxExpr, pos: pos})
+		i = end
+		for i < hi && t.toks[i].tok == token.SEMICOLON {
+			i++
+		}
+	}
+	if i >= hi || t.toks[i].tok != token.IDENT {
+		return "", 0, nil, nil, false
+	}
+	callee = t.toks[i].lit
+	callPos = t.toks[i].pos
+	if i+1 >= hi || t.toks[i+1].tok != token.LPAREN {
+		return "", 0, nil, nil, false
+	}
+	open := i + 1
+	close := matchParen(t.toks, open)
+	argRanges = splitCallArgs(t.toks, open+1, close)
+	j := close + 1
+	for j < hi && t.toks[j].tok == token.SEMICOLON {
+		j++
+	}
+	if j != hi {
+		return "", 0, nil, nil, false // more than the one statement
+	}
+	return callee, callPos, argRanges, placeDecls, true
+}
+
+// collectPlacedCallSites replaces the old collectPlaceAliases +
+// checkPlaceAliasNames: it walks every `placed par { ... }` block's
+// clauses, recursing through any if/else leaf dispatch
+// (parseIfElseBranches) down to its reachable leaves (parsePlacedCallLeaf),
+// validating each leaf's `place*; call` shape and its callee's parameter
+// list, and — on success — pushing one synthesized placeAliasScope per
+// placed call site into t.placeAliases, keyed by the CALLEE's own body
+// range and CALLEE's own parameter names (never the call-site's local
+// place names) — this is what lets matchLinkReceive/matchLinkSend/
+// resolvePlaceAlias work completely unchanged (see placeAliases' own doc
+// comment). Must run after checkNoNestedPlacedPar and
+// checkPlaceOnlyInsidePlacedPar.
+//
+// Per leaf, validates: no place-decl name collides with a top-level
+// proc/func name or the reserved name `link`, no duplicate place-decl
+// names in the leaf; the callee is a known top-level proc/func with a
+// matching argument count; for each positional argument, a chan-typed
+// parameter must be bound by exactly one of this leaf's place-decls (used
+// exactly once), and a non-chan parameter's argument must not be a
+// place-decl name and must be isConstExpr; every place-decl must be
+// consumed; and the callee must not already be placed-called elsewhere in
+// the file (a proc may be placed-called from at most one clause/leaf).
+func (t *transformer) collectPlacedCallSites() error {
+	procFuncNames := t.topLevelProcFuncNames()
+	constNames := t.collectTopLevelConstNames()
+	placedElsewhere := map[string]token.Pos{}
+
+	var walk func(lo, hi int) error
+	walk = func(lo, hi int) error {
+		for lo < hi && t.toks[lo].tok == token.SEMICOLON {
+			lo++
+		}
+		if _, _, thenLo, thenHi, elseLo, elseHi, _, ok := t.parseIfElseBranches(lo, hi); ok {
+			if err := walk(thenLo, thenHi); err != nil {
+				return err
+			}
+			return walk(elseLo, elseHi)
+		}
+
+		callee, callPos, argRanges, placeDecls, ok := t.parsePlacedCallLeaf(lo, hi)
+		if !ok {
+			return fmt.Errorf("%s: unsupported placed-par clause body — each clause (and each branch of an if/else within it) must be zero or more 'place NAME at link[EXPR]' statements followed by exactly one call to a placed-callable proc", t.file.Position(t.toks[lo].pos))
+		}
+
+		for _, pd := range placeDecls {
+			if pd.name == "link" {
+				return fmt.Errorf("%s: place alias %q may not shadow the reserved `link` identifier", t.file.Position(pd.pos), pd.name)
+			}
+			if procFuncNames[pd.name] {
+				return fmt.Errorf("%s: place alias %q collides with a proc/func name", t.file.Position(pd.pos), pd.name)
+			}
+		}
+		seenNames := map[string]bool{}
+		for _, pd := range placeDecls {
+			if seenNames[pd.name] {
+				return fmt.Errorf("%s: place alias %q declared more than once in the same scope", t.file.Position(pd.pos), pd.name)
+			}
+			seenNames[pd.name] = true
+		}
+
+		br, found := t.funcBodyByName[callee]
+		if !found {
+			return fmt.Errorf("%s: placed par calls undeclared proc %q", t.file.Position(callPos), callee)
+		}
+		names, dirs := t.paramNamesAndDirections(br.paramsLo, br.paramsHi)
+		if len(names) != len(argRanges) {
+			return fmt.Errorf("%s: proc %q takes %d parameter(s) but is placed-called with %d argument(s)", t.file.Position(callPos), callee, len(names), len(argRanges))
+		}
+
+		placeByName := map[string]placeDeclBinding{}
+		for _, pd := range placeDecls {
+			placeByName[pd.name] = pd
+		}
+		used := map[string]bool{}
+		aliases := map[string]string{}
+		for idx, arg := range argRanges {
+			argSrc := strings.TrimSpace(string(t.src[t.off(t.toks[arg[0]].pos):t.off(t.toks[arg[1]].pos)]))
+			isBareIdent := arg[1]-arg[0] == 1 && t.toks[arg[0]].tok == token.IDENT
+			pd, isPlaceName := placeByName[argSrc]
+			if dirs[idx] != dirNone {
+				if !isBareIdent || !isPlaceName {
+					return fmt.Errorf("%s: channel parameter %q of proc %q must be bound by a 'place NAME at link[EXPR]' statement in this placed-par clause before calling %q; got argument %q", t.file.Position(callPos), names[idx], callee, callee, argSrc)
+				}
+				used[argSrc] = true
+				aliases[names[idx]] = pd.idxExpr
+			} else {
+				if isPlaceName {
+					return fmt.Errorf("%s: place binding %q may not be passed to %q's non-channel parameter %q", t.file.Position(pd.pos), argSrc, callee, names[idx])
+				}
+				if !t.isConstExpr(arg[0], arg[1], constNames) {
+					return fmt.Errorf("%s: proc %q's parameter %q is placed-called with argument %q, which isn't a compile-time constant — a placed-callable proc's non-channel parameters must be constant at every placed call site; call bilink.Row()/Col()/NumRows()/NumCols()/ID() directly inside %q's own body instead of taking it as a parameter", t.file.Position(callPos), callee, names[idx], argSrc, callee)
+				}
+			}
+		}
+		for _, pd := range placeDecls {
+			if !used[pd.name] {
+				return fmt.Errorf("%s: place binding %q is never used — every 'place' statement in a placed-par clause must bind one of the called proc's channel parameters", t.file.Position(pd.pos), pd.name)
+			}
+		}
+
+		if prevPos, dup := placedElsewhere[callee]; dup {
+			return fmt.Errorf("%s: proc %q is placed-called more than once (already placed-called at %s); a proc may be placed-called from at most one clause in a placed par block", t.file.Position(callPos), callee, t.file.Position(prevPos))
+		}
+		placedElsewhere[callee] = callPos
+
+		if len(aliases) > 0 {
+			t.placeAliases = append(t.placeAliases, placeAliasScope{procName: callee, bodyLo: br.bodyLo, bodyHi: br.bodyHi, aliases: aliases})
+		}
+		return nil
+	}
+
+	for i := 0; i+2 < len(t.toks); i++ {
+		if !(t.toks[i].tok == token.IDENT && t.toks[i].lit == "placed" &&
+			t.toks[i+1].tok == token.IDENT && t.toks[i+1].lit == "par" &&
+			t.toks[i+2].tok == token.LBRACE) {
+			continue
+		}
+		close := matchBrace(t.toks, i+2)
+		clauses, ok := t.parsePlacedParClauses(i+3, close)
+		if !ok {
+			return fmt.Errorf("%s: unsupported placed-par shape", t.file.Position(t.toks[i].pos))
+		}
+		for _, cl := range clauses {
+			if err := walk(cl.bodyLo, cl.bodyHi); err != nil {
+				return err
 			}
 		}
 	}
@@ -1297,32 +1651,6 @@ func (t *transformer) resolvePlaceAlias(i int) (idxExpr string, ok bool) {
 		}
 	}
 	return "", false
-}
-
-// matchPlaceAliasDecl recognizes `place NAME at link[EXPR]` as a whole
-// statement — a compile-time-only declaration; collectPlaceAliases (run
-// earlier, before transform()) does the actual NAME -> EXPR binding, so
-// this only needs to recognize the shape and report where it ends, so
-// transform can erase it from the output (matching how a bare `skip`
-// statement erases itself: just the recognized tokens, leaving whatever
-// naturally follows — a `;` or `}` — for the outer scan to copy through
-// unchanged, a harmless empty statement). `place`/`at` are contextual
-// soft keywords, only meaningful in this exact five-token shape at a
-// statement start — neither is a Go keyword, so ordinary identifier use
-// elsewhere is unaffected.
-func (t *transformer) matchPlaceAliasDecl(lo, hi int) (end int, ok bool) {
-	if !t.isStmtStart(lo) {
-		return 0, false
-	}
-	if !(t.toks[lo].tok == token.IDENT && t.toks[lo].lit == "place" &&
-		lo+1 < hi && t.toks[lo+1].tok == token.IDENT &&
-		lo+2 < hi && t.toks[lo+2].tok == token.IDENT && t.toks[lo+2].lit == "at" &&
-		lo+3 < hi && t.toks[lo+3].tok == token.IDENT && t.toks[lo+3].lit == "link" &&
-		lo+4 < hi && t.toks[lo+4].tok == token.LBRACK) {
-		return 0, false
-	}
-	close := matchBracket(t.toks, lo+4)
-	return close + 1, true
 }
 
 // matchLinkReceive recognizes `link[idx] -> var` as a whole statement, or
@@ -1649,10 +1977,78 @@ func (t *transformer) emitPlacedParClauses(out *bytes.Buffer, lo, hi int) {
 		default:
 			out.WriteString("case bilink.Row() == " + cl.rowExpr + " && bilink.Col() == " + cl.colExpr + ":\n")
 		}
-		out.Write(t.transform(cl.bodyLo, cl.bodyHi))
+		t.emitPlacedClauseBody(out, cl.bodyLo, cl.bodyHi)
 		out.WriteString("\n")
 	}
 	out.WriteString("}")
+}
+
+// emitPlacedClauseBody mirrors collectPlacedCallSites's own leaf traversal
+// (parseIfElseBranches) but emits Go instead of validating: an if/else
+// shape's skeleton is written literally (the condition re-run through
+// t.transform, defensively, in case it ever contains arrow-sugar —
+// realistically it's always a plain boolean comparison over
+// bilink.Row()/Col()), recursing per branch; a bare leaf is handed to
+// emitPlacedCallLeaf. Any shape this can't handle has already been
+// rejected by collectPlacedCallSites before transform() ever runs — this
+// is a should-never-happen guard, the same style emitPlacedParClauses's
+// own panic already uses.
+func (t *transformer) emitPlacedClauseBody(out *bytes.Buffer, lo, hi int) {
+	for lo < hi && t.toks[lo].tok == token.SEMICOLON {
+		lo++
+	}
+	if condLo, condHi, thenLo, thenHi, elseLo, elseHi, elseIsIf, ok := t.parseIfElseBranches(lo, hi); ok {
+		out.WriteString("if ")
+		out.Write(t.transform(condLo, condHi))
+		out.WriteString(" {\n")
+		t.emitPlacedClauseBody(out, thenLo, thenHi)
+		out.WriteString("\n} else ")
+		if elseIsIf {
+			t.emitPlacedClauseBody(out, elseLo, elseHi)
+		} else {
+			out.WriteString("{\n")
+			t.emitPlacedClauseBody(out, elseLo, elseHi)
+			out.WriteString("\n}")
+		}
+		return
+	}
+	t.emitPlacedCallLeaf(out, lo, hi)
+}
+
+// emitPlacedCallLeaf re-parses [lo,hi) via parsePlacedCallLeaf (place
+// decls are simply never copied to out — they contribute nothing to the
+// emitted Go, same net effect the old matchPlaceAliasDecl's erasure used
+// to have, just achieved by never visiting those tokens at all instead of
+// erasing them mid-walk) and writes `callee(arg0, arg1, ...)`: for each
+// positional argument whose callee parameter is chan-typed, writes the
+// literal `nil` (that parameter is never touched as a real Go channel —
+// every legal use of it inside the callee's own body is intercepted by
+// matchLinkReceive/matchLinkSend before it would ever become a plain Go
+// channel op, via the placeAliasScope collectPlacedCallSites already
+// pushed for that callee); every other argument's original source text is
+// copied verbatim (already validated as a constant expression).
+func (t *transformer) emitPlacedCallLeaf(out *bytes.Buffer, lo, hi int) {
+	callee, _, argRanges, _, ok := t.parsePlacedCallLeaf(lo, hi)
+	if !ok {
+		panic(fmt.Sprintf("unsupported placed-par clause body shape at %q (%v)", t.toks[lo].lit, t.toks[lo].tok))
+	}
+	br, found := t.funcBodyByName[callee]
+	if !found {
+		panic(fmt.Sprintf("placed par calls undeclared proc %q", callee))
+	}
+	_, dirs := t.paramNamesAndDirections(br.paramsLo, br.paramsHi)
+	out.WriteString(callee + "(")
+	for idx, arg := range argRanges {
+		if idx > 0 {
+			out.WriteString(", ")
+		}
+		if idx < len(dirs) && dirs[idx] != dirNone {
+			out.WriteString("nil")
+		} else {
+			out.Write(t.src[t.off(t.toks[arg[0]].pos):t.off(t.toks[arg[1]].pos)])
+		}
+	}
+	out.WriteString(")")
 }
 
 // emitAltClauses parses every clause of an `alt { ... }` block ([lo,hi) is
@@ -2116,11 +2512,7 @@ func (t *transformer) transform(lo, hi int) []byte {
 			}
 
 		case tk.tok == token.IDENT:
-			if end, ok := t.matchPlaceAliasDecl(i, hi); ok {
-				flushTo(t.off(tk.pos))
-				cursor = t.off(t.toks[end].pos)
-				i = end
-			} else if idxSrc, varSrc, end, ok := t.matchLinkReceive(i, hi); ok {
+			if idxSrc, varSrc, end, ok := t.matchLinkReceive(i, hi); ok {
 				flushTo(t.off(tk.pos))
 				out.WriteString(varSrc + " = bilink.Recv(" + idxSrc + ")")
 				cursor = t.off(t.toks[end].pos)
@@ -2272,7 +2664,8 @@ func (t *transformer) checkNoBufferedChannels() error {
 
 // singleCallText reports whether the body [lo,hi) reduces to exactly one
 // bare call statement (`name(...)`, no other statements before or after,
-// modulo semicolons) — and if so, returns the called function's name.
+// modulo semicolons and any number of leading `place NAME at link[EXPR]`
+// declarations) — and if so, returns the called function's name.
 // Used only by PlacementManifest, to decide whether a placement clause's
 // body can be summarized as "this proc runs here"; a clause whose body
 // does anything else (an if/else, several statements, ...) is recorded in
@@ -2281,8 +2674,16 @@ func (t *transformer) checkNoBufferedChannels() error {
 // rather than a bug to fix.
 func (t *transformer) singleCallText(lo, hi int) (name string, ok bool) {
 	i := lo
-	for i < hi && t.toks[i].tok == token.SEMICOLON {
-		i++
+	for i < hi {
+		if t.toks[i].tok == token.SEMICOLON {
+			i++
+			continue
+		}
+		if _, _, _, end, declOK := t.parsePlaceDecl(i, hi); declOK {
+			i = end
+			continue
+		}
+		break
 	}
 	if i >= hi || t.toks[i].tok != token.IDENT {
 		return "", false
@@ -2332,9 +2733,12 @@ func yamlScalar(expr string) string {
 // proc, and each proc's link aliases), pulled forward from the much
 // bigger, unstarted "layout tooling" subproject (processor -> host,
 // channel -> link) because it falls out of bilc's own parsing almost for
-// free: matchPlacedPar/parsePlacedParClauses and collectPlaceAliases
-// already fully parse this structure to emit the runtime `switch`, so
-// serializing it costs little more. Returns (nil, nil) for a file with no
+// free: parsePlacedParClauses and collectPlacedCallSites already fully
+// parse this structure to emit the runtime `switch`, so serializing it
+// costs little more. Note the `links: aliases:` section below is keyed by
+// each callee's own parameter names, not by whatever local name a call
+// site chose for its `place` statements — see placeAliases' own doc
+// comment. Returns (nil, nil) for a file with no
 // `placed par` block at all — most .bil files — so callers can treat a
 // nil result as "nothing to write" without a separate has-any check of
 // their own. Deliberately not a build-time image splitter, host mapper,
@@ -2361,7 +2765,8 @@ func PlacementManifest(filename string, src []byte) ([]byte, error) {
 		filename = abs
 	}
 	t := tokenize(filename, src)
-	if err := t.collectPlaceAliases(); err != nil {
+	t.buildFuncBodyIndex()
+	if err := t.collectPlacedCallSites(); err != nil {
 		return nil, err
 	}
 	var clauses []placedClause
@@ -2449,6 +2854,7 @@ func Transform(filename string, src []byte) ([]byte, error) {
 		filename = abs
 	}
 	t := tokenize(filename, src)
+	t.buildFuncBodyIndex()
 	for _, tk := range t.toks {
 		if tk.tok == token.IDENT && tk.lit == "altN" {
 			t.usedAltN = true
@@ -2469,13 +2875,13 @@ func Transform(filename string, src []byte) ([]byte, error) {
 	if err := t.checkNoBufferedChannels(); err != nil {
 		return nil, err
 	}
-	if err := t.collectPlaceAliases(); err != nil {
-		return nil, err
-	}
-	if err := t.checkPlaceAliasNames(); err != nil {
-		return nil, err
-	}
 	if err := t.checkNoNestedPlacedPar(); err != nil {
+		return nil, err
+	}
+	if err := t.checkPlaceOnlyInsidePlacedPar(); err != nil {
+		return nil, err
+	}
+	if err := t.collectPlacedCallSites(); err != nil {
 		return nil, err
 	}
 	body := t.transform(0, len(t.toks)-1) // exclude EOF sentinel

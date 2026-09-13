@@ -1,0 +1,18 @@
+package main
+
+proc relay(toEast chan<- int32) {
+	toEast <- 1
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place toEast at link[1]
+			relay(toEast)
+		}
+		processor(1) {
+			place toEast at link[1]
+			relay(toEast)
+		}
+	}
+}

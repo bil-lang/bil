@@ -1,0 +1,13 @@
+package main
+
+proc controller(toEast chan<- int32) {
+	toEast <- 1
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			controller(toEast)
+		}
+	}
+}

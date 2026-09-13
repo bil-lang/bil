@@ -1,0 +1,14 @@
+package main
+
+proc controller(cols int) {
+	println(cols)
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place cols at link[1]
+			controller(cols)
+		}
+	}
+}

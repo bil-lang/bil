@@ -1,9 +1,8 @@
 package main
 
-proc controller() {
-	place relay at link[1]
+proc controller(east chan int32) {
 	var v int32
-	relay -> v
+	east -> v
 }
 
 proc relay() {
@@ -11,5 +10,10 @@ proc relay() {
 }
 
 func main() {
-	controller()
+	placed par {
+		processor(0) {
+			place relay at link[1]
+			controller(relay)
+		}
+	}
 }

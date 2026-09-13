@@ -14,14 +14,28 @@
 // itself as the only new machinery: the send/receive pattern is
 // exactly Example 19's already-verified one.
 //
-// `place NAME at link[EXPR]` gives each role's own link a short local
-// name — `toEast`, `toWest`, `fromWest` — so a proc's body reads as
-// "receive from my west neighbour", not "receive from link[3]", with
-// the mapping declared once, right where the proc uses it, rather than
-// carried in your head the way Example 19's raw `link[3]` needs to be.
-// Purely a naming convenience: `place` emits no Go at all, and
-// `toEast -> v` compiles to exactly the same `bilink.Recv` call
-// `link[1] -> v` would.
+// `place NAME at link[EXPR]` now lives in the `placed par` clause that
+// *calls* a proc, not inside the proc's own body: it binds one of the
+// callee's own declared channel parameters to a physical link, rather
+// than inventing a brand-new name. `controller`/`rowEnd`/`relay` below
+// are ordinary chan/proc Bil — no `place`/`link` anywhere in them —
+// exactly the shape Example 01/02 already use, and could in principle
+// be developed and tested with real `make(chan int32)` wiring before
+// ever being placed at all. `place` only appears in `main()`, where
+// each clause wires the proc it calls onto specific links. A `chan T`
+// parameter used bidirectionally by one proc (send then receive on the
+// same physical link, as the old design's `toEast`/`toWest` aliases
+// did) becomes two separate directional parameters here instead
+// (`chan<- int32` / `<-chan int32`), each `place`d onto the *same*
+// link index — a real Go channel can't be used for both directions in
+// one proc (see checkProcChanBothDirections), so one physical,
+// bidirectional link is now two Go-level channels sharing an index.
+// A proc's non-channel parameters must be genuine compile-time
+// constants at every placed call site — a proc needing runtime
+// information (grid size, its own position) calls
+// bilink.Row()/Col()/NumCols() etc. directly, itself, rather than
+// receiving it as a parameter; `controller` below is the concrete
+// example (it used to take `cols int` as a parameter).
 
 package main
 
@@ -31,29 +45,29 @@ const rounds = 3
 const hopDelay = 150 * time.Millisecond
 
 // controller runs at exactly one processor, (0,0): originates each
-// round's value east, then waits for it to come back reflected.
-proc controller(cols int) {
-	place toEast at link[1]
+// round's value east on toEast, then waits for it to come back
+// reflected on fromEast.
+proc controller(toEast chan<- int32, fromEast <-chan int32) {
+	cols := bilink.NumCols()
 	bilink.Screenf("controller ready, %d cols", cols)
 	for round := 0; round < rounds; round++ {
 		time.Sleep(hopDelay)
 		toEast <- int32(round)
 		var v int32
-		toEast -> v
+		fromEast -> v
 		bilink.Screenf("round %d: reflected %d", round, v)
 	}
 	bilink.Screenf("controller done")
 	stop
 }
 
-// rowEnd runs at (0,cols-1): the far end of row 0, reflecting whatever
-// arrives from the west straight back.
-proc rowEnd() {
-	place toWest at link[3]
+// rowEnd runs at (0,cols-1): the far end of row 0, receiving from the
+// west and reflecting straight back west.
+proc rowEnd(fromWest <-chan int32, toWest chan<- int32) {
 	bilink.Screenf("row-end ready")
 	for round := 0; round < rounds; round++ {
 		var v int32
-		toWest -> v
+		fromWest -> v
 		bilink.Screenf("round %d: got %d, reflecting", round, v)
 		time.Sleep(hopDelay)
 		toWest <- v
@@ -63,18 +77,17 @@ proc rowEnd() {
 }
 
 // relay runs on every other row-0 processor: forward east, forward
-// the reflection back west.
-proc relay() {
-	place fromWest at link[3]
-	place toEast at link[1]
+// the reflection back west. Both the west and east links are used
+// bidirectionally, so each gets two directional parameters.
+proc relay(fromWestIn <-chan int32, toEastOut chan<- int32, toEastIn <-chan int32, fromWestOut chan<- int32) {
 	bilink.Screenf("relay ready")
 	for round := 0; round < rounds; round++ {
 		var v int32
-		fromWest -> v
-		toEast <- v
+		fromWestIn -> v
+		toEastOut <- v
 		var v2 int32
-		toEast -> v2
-		fromWest <- v2
+		toEastIn -> v2
+		fromWestOut <- v2
 	}
 	bilink.Screenf("relay done")
 	stop
@@ -92,14 +105,22 @@ func main() {
 
 	placed par {
 		processor(0, 0) {
-			controller(cols)
+			place toEast at link[1]
+			place fromEast at link[1]
+			controller(toEast, fromEast)
 		}
 		processor(0, cols-1) {
-			rowEnd()
+			place fromWest at link[3]
+			place toWest at link[3]
+			rowEnd(fromWest, toWest)
 		}
 		default {
 			if r == 0 {
-				relay()
+				place fromWestIn at link[3]
+				place toEastOut at link[1]
+				place toEastIn at link[1]
+				place fromWestOut at link[3]
+				relay(fromWestIn, toEastOut, toEastIn, fromWestOut)
 			} else {
 				idle()
 			}
