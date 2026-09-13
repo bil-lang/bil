@@ -1896,12 +1896,33 @@ func (t *transformer) splitCommaExprs(lo, hi int) (exprs []string, ok bool) {
 // out of: occam's own PROCESSOR is a topology-agnostic flat int, but a 2D
 // grid is Bil's dominant case and deserves not to need row*cols+col
 // arithmetic by hand).
+//
+// Either slot of the two-arg form may be a literal `*` instead of an
+// expression -- `processor(1, *)` matches every column of row 1,
+// `processor(*, 0)` matches every row's column 0 -- recorded as the raw
+// sentinel string "*" in rowExpr/colExpr rather than a separate bool
+// field, since "*" can never be a real Go expression and every consumer
+// here already just holds these as opaque source text. `processor(*)`
+// (the one-arg form) and `processor(*, *)` both mean "matches every
+// node" -- exactly what `default` means -- and are treated identically
+// to an explicit `default` clause everywhere downstream (isFullyWild),
+// right down to needing to be the block's last clause for the same
+// reason: placement's whole point is the identity gate, so a clause
+// after the one that matches everything could never be reached.
 type placedClause struct {
 	isDefault      bool
 	idExpr         string
 	rowExpr        string
 	colExpr        string
 	bodyLo, bodyHi int
+}
+
+// isFullyWild reports whether cl matches every node -- an explicit
+// `default` clause, `processor(*)`, or `processor(*, *)` -- as opposed
+// to a partial wildcard (`processor(1, *)`) which narrows on one
+// dimension but still leaves the other an identity gate.
+func (cl placedClause) isFullyWild() bool {
+	return cl.isDefault || cl.idExpr == "*" || (cl.rowExpr == "*" && cl.colExpr == "*")
 }
 
 // parsePlacedParClauses parses every clause of a `placed par { ... }` block
@@ -1956,6 +1977,9 @@ func (t *transformer) parsePlacedParClauses(lo, hi int) (clauses []placedClause,
 			cl.rowExpr, cl.colExpr = exprs[0], exprs[1]
 		}
 		clauses = append(clauses, cl)
+		if cl.isFullyWild() {
+			sawDefault = true // processor(*)/processor(*, *) matches everything, same as default
+		}
 		j = bodyClose + 1
 	}
 	if len(clauses) == 0 {
@@ -2005,10 +2029,17 @@ func (t *transformer) emitPlacedParClauses(out *bytes.Buffer, lo, hi int) {
 		// before emitting the one call that actually runs.
 		for _, cl := range clauses {
 			switch {
-			case cl.idExpr != "":
+			case cl.idExpr != "" && cl.idExpr != "*":
 				fmt.Fprintf(out, "_ = (%s)\n", cl.idExpr)
-			case cl.rowExpr != "":
-				fmt.Fprintf(out, "_ = (%s)\n_ = (%s)\n", cl.rowExpr, cl.colExpr)
+			case cl.rowExpr != "" || cl.colExpr != "":
+				// A wildcarded slot ("*") is never real Go source -- only
+				// discard-reference whichever slot is a genuine expression.
+				if cl.rowExpr != "" && cl.rowExpr != "*" {
+					fmt.Fprintf(out, "_ = (%s)\n", cl.rowExpr)
+				}
+				if cl.colExpr != "" && cl.colExpr != "*" {
+					fmt.Fprintf(out, "_ = (%s)\n", cl.colExpr)
+				}
 			}
 		}
 		for _, leaf := range leaves {
@@ -2026,10 +2057,21 @@ func (t *transformer) emitPlacedParClauses(out *bytes.Buffer, lo, hi int) {
 	out.WriteString("switch {\n")
 	for _, cl := range clauses {
 		switch {
-		case cl.isDefault:
+		case cl.isFullyWild():
+			// `default`, `processor(*)`, and `processor(*, *)` all match
+			// every node -- Go's own `default:` already means exactly
+			// that, and (unlike an ordinary `case`) runs last regardless
+			// of where it sits among the other cases, so it needs no
+			// comparison at all.
 			out.WriteString("default:\n")
 		case cl.idExpr != "":
 			out.WriteString("case bilink.ID() == " + cl.idExpr + ":\n")
+		case cl.rowExpr == "*":
+			// Row wildcarded, column pinned: processor(*, C).
+			out.WriteString("case bilink.Col() == " + cl.colExpr + ":\n")
+		case cl.colExpr == "*":
+			// Column wildcarded, row pinned: processor(R, *).
+			out.WriteString("case bilink.Row() == " + cl.rowExpr + ":\n")
 		default:
 			out.WriteString("case bilink.Row() == " + cl.rowExpr + " && bilink.Col() == " + cl.colExpr + ":\n")
 		}
@@ -2965,7 +3007,10 @@ func PlacementManifest(filename string, src []byte) ([]byte, error) {
 	var defaultClause *placedClause
 	for i := range clauses {
 		cl := &clauses[i]
-		if cl.isDefault {
+		if cl.isFullyWild() {
+			// processor(*)/processor(*, *) match every node, same as an
+			// explicit `default` clause -- fold into the same section
+			// rather than listing them as just another placement match.
 			defaultClause = cl
 			continue
 		}
@@ -3025,6 +3070,15 @@ func PlacementManifest(filename string, src []byte) ([]byte, error) {
 // real row/col/rows/cols with its own small expression evaluator (never
 // bilc's own -- only the host ever knows a launch's concrete grid
 // size). Returns (nil, nil) for a file with no placed par at all.
+//
+// A row/col match's Row or Col field may be the literal string "*"
+// instead of an expression (from a partial wildcard like
+// `processor(1, *)`) -- needs no expression evaluator at all, a host
+// just skips comparing that one dimension. A match that wildcards both
+// (or a bare `default`/`processor(*)`) is reported as Default instead,
+// not as Row/Col "*","*" -- see isFullyWild -- so a host never needs to
+// special-case "*" against Default, only against a real expression in
+// the other slot.
 func DeployManifest(filename string, src []byte) ([]byte, error) {
 	if abs, err := filepath.Abs(filename); err == nil {
 		filename = abs
@@ -3075,11 +3129,17 @@ func DeployManifest(filename string, src []byte) ([]byte, error) {
 	for _, leaf := range leaves {
 		m := jsonMatch{}
 		switch {
-		case leaf.clause.isDefault:
+		case leaf.clause.isFullyWild():
+			// default, processor(*), and processor(*, *) all match every
+			// node -- indistinguishable to a host, which only ever needs
+			// to know "no comparison required."
 			m.Default = true
 		case leaf.clause.idExpr != "":
 			m.ID = leaf.clause.idExpr
 		default:
+			// Row and/or Col may be the literal string "*" here
+			// (processor(1, *) / processor(*, 0)) -- see this function's
+			// own doc comment for what a host must do with that.
 			m.Row, m.Col = leaf.clause.rowExpr, leaf.clause.colExpr
 		}
 		conds := make([]jsonCondition, 0, len(leaf.conditions))

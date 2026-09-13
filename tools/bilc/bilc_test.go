@@ -727,6 +727,154 @@ func main() {
 	}
 }
 
+// TestPlacedParWildcard exercises `processor(...)`'s wildcard forms
+// across all four consumers that parse a placed-par block: Transform's
+// switch codegen, PlacementManifest's YAML, DeployManifest's JSON, and
+// RoleBinaries' per-role Go. The fixture uses `processor(1, *)` (row
+// pinned, column wild) and `processor(*, *)` (fully wild, replacing an
+// explicit `default`) side by side with an ordinary exact-node clause,
+// so each consumer's wildcard-vs-exact handling can be checked in one
+// place.
+func TestPlacedParWildcard(t *testing.T) {
+	src := []byte(`package main
+
+proc controller(toEast chan<- int32) {
+	toEast <- 1
+}
+
+proc relay() {
+	println("relay")
+}
+
+proc idle() {
+	println("idle")
+}
+
+func main() {
+	placed par {
+		processor(1, 0) {
+			place toEast at link[1]
+			controller(toEast)
+		}
+		processor(1, *) {
+			relay()
+		}
+		processor(*, *) {
+			idle()
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"case bilink.Row() == 1 && bilink.Col() == 0:",
+		"case bilink.Row() == 1:",
+		"default:",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in transformed output, got:\n%s", want, got)
+		}
+	}
+	// processor(*, *) must compile to Go's own `default:`, never a
+	// literal `*` spliced into a comparison -- that would be invalid Go.
+	if strings.Contains(got, "== *") || strings.Contains(got, "* ==") {
+		t.Errorf("expected the wildcard sentinel to never reach a comparison, got:\n%s", got)
+	}
+
+	pm, err := PlacementManifest("test.bil", src)
+	if err != nil {
+		t.Fatalf("PlacementManifest: %v", err)
+	}
+	gotPM := string(pm)
+	for _, want := range []string{
+		"match: {row: 1, col: 0}",
+		"proc: controller",
+		`match: {row: 1, col: "*"}`,
+		"proc: relay",
+		"default:",
+		"proc: idle",
+	} {
+		if !strings.Contains(gotPM, want) {
+			t.Errorf("expected %q in placement manifest, got:\n%s", want, gotPM)
+		}
+	}
+	// processor(*, *) folds into the same `default:` section as an
+	// explicit `default` clause would -- it must not also appear as its
+	// own `- match: {...}` list entry.
+	if strings.Contains(gotPM, `col: "*", `) || strings.Contains(gotPM, `row: "*"`) {
+		t.Errorf("expected the fully-wild clause to be folded into default:, not listed as its own match, got:\n%s", gotPM)
+	}
+
+	dm, err := DeployManifest("test.bil", src)
+	if err != nil {
+		t.Fatalf("DeployManifest: %v", err)
+	}
+	gotDM := string(dm)
+	for _, want := range []string{
+		`"row": "1"`,
+		`"col": "0"`,
+		`"proc": "controller"`,
+		`"col": "*"`,
+		`"proc": "relay"`,
+		`"default": true`,
+		`"proc": "idle"`,
+	} {
+		if !strings.Contains(gotDM, want) {
+			t.Errorf("expected %q in deploy manifest, got:\n%s", want, gotDM)
+		}
+	}
+
+	roles, err := RoleBinaries("test.bil", src)
+	if err != nil {
+		t.Fatalf("RoleBinaries: %v", err)
+	}
+	for _, name := range []string{"controller", "relay", "idle"} {
+		role, ok := roles[name]
+		if !ok {
+			t.Fatalf("expected a %q role binary, got roles: %v", name, roles)
+		}
+		if _, err := format.Source(role); err != nil {
+			t.Errorf("role %q not valid Go: %v\n%s", name, err, role)
+		}
+	}
+}
+
+// TestPlacedParWildcardMustBeLast checks that a fully-wild clause
+// (`processor(*)`/`processor(*, *)`) is rejected unless it's the block's
+// last clause -- the same "default must be last" rule an explicit
+// `default` already enforces, since both mean "matches every node" and
+// a clause after one can never be reached.
+func TestPlacedParWildcardMustBeLast(t *testing.T) {
+	src := []byte(`package main
+
+proc idle() {
+	println("idle")
+}
+
+proc controller() {
+	println("controller")
+}
+
+func main() {
+	placed par {
+		processor(*, *) {
+			idle()
+		}
+		processor(0, 0) {
+			controller()
+		}
+	}
+}
+`)
+	if _, err := Transform("test.bil", src); err == nil {
+		t.Fatalf("expected an error for a clause following a fully-wild processor(*, *), got none")
+	}
+}
+
 // TestPlacedCallSiteConstantParam checks that a placed-callable proc may
 // take a genuine compile-time-constant parameter (a literal, or a
 // reference to a package-level const) alongside its channel parameters --
