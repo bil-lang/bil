@@ -1,0 +1,1 @@
+declared as a bare, undirected chan -- a proc called from a placed par clause must declare every channel parameter with an explicit direction

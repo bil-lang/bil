@@ -1564,6 +1564,11 @@ func (t *transformer) collectPlacedCallSites() error {
 		if len(names) != len(argRanges) {
 			return fmt.Errorf("%s: proc %q takes %d parameter(s) but is placed-called with %d argument(s)", t.file.Position(callPos), callee, len(names), len(argRanges))
 		}
+		for idx, d := range dirs {
+			if d == dirBoth {
+				return fmt.Errorf("%s: proc %q's channel parameter %q is declared as a bare, undirected chan -- a proc called from a placed par clause must declare every channel parameter with an explicit direction (<-chan T for receive-only, chan<- T for send-only), so Go's own compiler -- not checkProcChanBothDirections's best-effort body-scan, which can miss a send/receive reached through an alias -- guarantees it's never used for both", t.file.Position(callPos), callee, names[idx])
+			}
+		}
 
 		placeByName := map[string]placeDeclBinding{}
 		for _, pd := range placeDecls {
