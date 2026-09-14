@@ -17,21 +17,25 @@ import (
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: bil run <file.bil>")
 	fmt.Fprintln(os.Stderr, "       bil vet <file.bil>")
+	fmt.Fprintln(os.Stderr, "       bil emu [-rows N] [-cols N] [-addr host:port] [-open] <file.bil>")
 }
 
 func main() {
 	vet.EnsureGOROOT()
 
-	if len(os.Args) != 3 {
+	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
 	}
-	cmd, src := os.Args[1], os.Args[2]
-	switch cmd {
-	case "run":
-		os.Exit(runCmd(src, true, os.Stdout, os.Stderr))
-	case "vet":
-		os.Exit(runCmd(src, false, os.Stdout, os.Stderr))
+	switch cmd := os.Args[1]; cmd {
+	case "run", "vet":
+		if len(os.Args) != 3 {
+			usage()
+			os.Exit(2)
+		}
+		os.Exit(runCmd(os.Args[2], cmd == "run", os.Stdout, os.Stderr))
+	case "emu":
+		os.Exit(emuMain(os.Args[2:], os.Stdout, os.Stderr))
 	default:
 		usage()
 		os.Exit(2)
