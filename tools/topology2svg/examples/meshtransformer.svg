@@ -1,8 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="530" viewBox="0 0 1300 530" font-family="Helvetica, Arial, sans-serif">
-<title>placedcontroller</title>
-<rect x="0" y="0" width="1300" height="530" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="390" viewBox="0 0 1300 390" font-family="Helvetica, Arial, sans-serif">
+<title>meshtransformer</title>
+<rect x="0" y="0" width="1300" height="390" fill="#ffffff"/>
 <defs><marker id="arrow-out" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#333"/></marker></defs>
-<text x="50" y="50" font-size="18" font-weight="bold" fill="#222">placedcontroller</text>
+<text x="50" y="50" font-size="18" font-weight="bold" fill="#222">meshtransformer</text>
 <rect x="50" y="90" width="150" height="80" rx="10" fill="#E69F00" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
 <text x="125.0" y="126.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">controller</text>
 <text x="125.0" y="146.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 0, col 0</text>
@@ -79,31 +79,13 @@
 <rect x="1100" y="230" width="150" height="80" rx="10" fill="#F0E442" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
 <text x="1175.0" y="266.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
 <text x="1175.0" y="286.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 1, col 5</text>
-<rect x="50" y="370" width="150" height="80" rx="10" fill="#F0E442" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
-<text x="125.0" y="406.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
-<text x="125.0" y="426.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 2, col 0</text>
-<rect x="260" y="370" width="150" height="80" rx="10" fill="#F0E442" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
-<text x="335.0" y="406.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
-<text x="335.0" y="426.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 2, col 1</text>
-<rect x="470" y="370" width="150" height="80" rx="10" fill="#F0E442" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
-<text x="545.0" y="406.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
-<text x="545.0" y="426.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 2, col 2</text>
-<rect x="680" y="370" width="150" height="80" rx="10" fill="#F0E442" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
-<text x="755.0" y="406.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
-<text x="755.0" y="426.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 2, col 3</text>
-<rect x="890" y="370" width="150" height="80" rx="10" fill="#F0E442" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
-<text x="965.0" y="406.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
-<text x="965.0" y="426.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 2, col 4</text>
-<rect x="1100" y="370" width="150" height="80" rx="10" fill="#F0E442" fill-opacity="0.9" stroke="#888888" stroke-width="1.5"/>
-<text x="1175.0" y="406.0" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">idle</text>
-<text x="1175.0" y="426.0" text-anchor="middle" font-size="10" fill="#ffffff" opacity="0.85">row 2, col 5</text>
-<text x="50" y="474" font-size="11" fill="#555">Legend:</text>
-<rect x="110" y="464" width="12" height="12" rx="2" fill="#E69F00"/>
-<text x="126" y="474" font-size="11" fill="#333">controller</text>
-<rect x="236" y="464" width="12" height="12" rx="2" fill="#56B4E9"/>
-<text x="252" y="474" font-size="11" fill="#333">relay</text>
-<rect x="317" y="464" width="12" height="12" rx="2" fill="#009E73"/>
-<text x="333" y="474" font-size="11" fill="#333">rowEnd</text>
-<rect x="407" y="464" width="12" height="12" rx="2" fill="#F0E442"/>
-<text x="423" y="474" font-size="11" fill="#333">idle</text>
+<text x="50" y="334" font-size="11" fill="#555">Legend:</text>
+<rect x="110" y="324" width="12" height="12" rx="2" fill="#E69F00"/>
+<text x="126" y="334" font-size="11" fill="#333">controller</text>
+<rect x="236" y="324" width="12" height="12" rx="2" fill="#56B4E9"/>
+<text x="252" y="334" font-size="11" fill="#333">relay</text>
+<rect x="317" y="324" width="12" height="12" rx="2" fill="#009E73"/>
+<text x="333" y="334" font-size="11" fill="#333">rowEnd</text>
+<rect x="407" y="324" width="12" height="12" rx="2" fill="#F0E442"/>
+<text x="423" y="334" font-size="11" fill="#333">idle</text>
 </svg>
