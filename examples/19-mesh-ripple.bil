@@ -57,7 +57,7 @@ proc origin(eastOut chan<- int32, eastIn <-chan int32) {
 		stop
 	}
 
-	for wave := 0; wave < waves; wave++ {
+	for wave := range waves {
 		time.Sleep(hopDelay)
 		bilink.Screenf("wave %d: send east = %d", wave, wave)
 		eastOut <- int32(wave)
@@ -76,7 +76,7 @@ proc reflect(westIn <-chan int32, westOut chan<- int32) {
 	r, c := bilink.Row(), bilink.Col()
 	bilink.Screenf("(%d,%d) ready", r, c)
 
-	for wave := 0; wave < waves; wave++ {
+	for wave := range waves {
 		var v int32
 		westIn -> v
 		bilink.Screenf("wave %d: got %d, reflecting", wave, v)
@@ -94,7 +94,7 @@ proc relay(westIn <-chan int32, eastOut chan<- int32, eastIn <-chan int32, westO
 	r, c := bilink.Row(), bilink.Col()
 	bilink.Screenf("(%d,%d) ready", r, c)
 
-	for wave := 0; wave < waves; wave++ {
+	for wave := range waves {
 		var v int32
 		westIn -> v
 		bilink.Screenf("wave %d: got %d, forward east", wave, v)

@@ -167,7 +167,7 @@ func posEncode(pos int) [dModel]float64 {
 
 func add4(a, b [dModel]float64) [dModel]float64 {
 	var y [dModel]float64
-	for i := 0; i < dModel; i++ {
+	for i := range dModel {
 		y[i] = a[i] + b[i]
 	}
 	return y
@@ -175,9 +175,9 @@ func add4(a, b [dModel]float64) [dModel]float64 {
 
 func matVec4(w [dModel][dModel]float64, x [dModel]float64) [dModel]float64 {
 	var y [dModel]float64
-	for i := 0; i < dModel; i++ {
+	for i := range dModel {
 		sum := 0.0
-		for j := 0; j < dModel; j++ {
+		for j := range dModel {
 			sum += w[i][j] * x[j]
 		}
 		y[i] = sum
@@ -187,7 +187,7 @@ func matVec4(w [dModel][dModel]float64, x [dModel]float64) [dModel]float64 {
 
 func dot4(a, b [dModel]float64) float64 {
 	sum := 0.0
-	for i := 0; i < dModel; i++ {
+	for i := range dModel {
 		sum += a[i] * b[i]
 	}
 	return sum
@@ -221,17 +221,17 @@ func relu(x float64) float64 {
 
 func feedForward(x [dModel]float64) [dModel]float64 {
 	var hidden [dFF]float64
-	for j := 0; j < dFF; j++ {
+	for j := range dFF {
 		sum := b1[j]
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			sum += x[i] * w1[i][j]
 		}
 		hidden[j] = relu(sum)
 	}
 	var out [dModel]float64
-	for k := 0; k < dModel; k++ {
+	for k := range dModel {
 		sum := b2[k]
-		for j := 0; j < dFF; j++ {
+		for j := range dFF {
 			sum += hidden[j] * w2[j][k]
 		}
 		out[k] = sum
@@ -241,9 +241,9 @@ func feedForward(x [dModel]float64) [dModel]float64 {
 
 func outputLogits(x [dModel]float64) [vocabSize]float64 {
 	var logits [vocabSize]float64
-	for k := 0; k < vocabSize; k++ {
+	for k := range vocabSize {
 		sum := 0.0
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			sum += x[i] * wo[i][k]
 		}
 		logits[k] = sum
@@ -272,23 +272,23 @@ func runAttention(xs [][dModel]float64) [][dModel]float64 {
 	q := make([][dModel]float64, cols)
 	k := make([][dModel]float64, cols)
 	v := make([][dModel]float64, cols)
-	for c := 0; c < cols; c++ {
+	for c := range cols {
 		q[c] = matVec4(wq, xs[c])
 		k[c] = matVec4(wk, xs[c])
 		v[c] = matVec4(wv, xs[c])
 	}
 
 	resid1 := make([][dModel]float64, cols)
-	for c := 0; c < cols; c++ {
+	for c := range cols {
 		scores := make([]float64, cols)
-		for j := 0; j < cols; j++ {
+		for j := range cols {
 			scores[j] = dot4(q[c], k[j]) / math.Sqrt(float64(dModel))
 		}
 		weights := softmax(scores)
 
 		var attnOut [dModel]float64
-		for j := 0; j < cols; j++ {
-			for i := 0; i < dModel; i++ {
+		for j := range cols {
+			for i := range dModel {
 				attnOut[i] += weights[j] * v[j][i]
 			}
 		}
@@ -327,7 +327,7 @@ func f32val(bits int32) float64 { return float64(math.Float32frombits(uint32(bit
 // channel parameters instead of sharing one.
 proc embedStage(south chan<- int32) {
 	sendSouth := func(v [dModel]float64) {
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			south <- f32bits(v[i])
 		}
 	}
@@ -335,7 +335,7 @@ proc embedStage(south chan<- int32) {
 	c := bilink.Col()
 	bilink.Screenf("embed ready at col %d", c)
 
-	for gen := 0; gen < generations; gen++ {
+	for gen := range generations {
 		tok := (c + gen) % vocabSize
 		x0 := add4(embedding[tok], posEncode(c))
 		time.Sleep(hopDelay)
@@ -361,7 +361,7 @@ proc embedStage(south chan<- int32) {
 proc attnController(north <-chan int32, eastIn <-chan int32, eastOut chan<- int32, south chan<- int32) {
 	recvNorth := func() [dModel]float64 {
 		var v [dModel]float64
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			var bits int32
 			north -> bits
 			v[i] = f32val(bits)
@@ -370,7 +370,7 @@ proc attnController(north <-chan int32, eastIn <-chan int32, eastOut chan<- int3
 	}
 	recvEast := func() [dModel]float64 {
 		var v [dModel]float64
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			var bits int32
 			eastIn -> bits
 			v[i] = f32val(bits)
@@ -378,12 +378,12 @@ proc attnController(north <-chan int32, eastIn <-chan int32, eastOut chan<- int3
 		return v
 	}
 	sendEast := func(v [dModel]float64) {
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			eastOut <- f32bits(v[i])
 		}
 	}
 	sendSouth := func(v [dModel]float64) {
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			south <- f32bits(v[i])
 		}
 	}
@@ -391,7 +391,7 @@ proc attnController(north <-chan int32, eastIn <-chan int32, eastOut chan<- int3
 	cols := bilink.NumCols()
 	bilink.Screenf("attn controller ready, %d cols", cols)
 
-	for gen := 0; gen < generations; gen++ {
+	for gen := range generations {
 		xs := make([][dModel]float64, cols)
 		xs[0] = recvNorth()
 
@@ -428,7 +428,7 @@ proc attnController(north <-chan int32, eastIn <-chan int32, eastOut chan<- int3
 proc attnRelay(north <-chan int32, eastIn <-chan int32, westOut chan<- int32, westIn <-chan int32, eastOut chan<- int32, south chan<- int32) {
 	recvNorth := func() [dModel]float64 {
 		var v [dModel]float64
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			var bits int32
 			north -> bits
 			v[i] = f32val(bits)
@@ -437,7 +437,7 @@ proc attnRelay(north <-chan int32, eastIn <-chan int32, westOut chan<- int32, we
 	}
 	recvEast := func() [dModel]float64 {
 		var v [dModel]float64
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			var bits int32
 			eastIn -> bits
 			v[i] = f32val(bits)
@@ -446,7 +446,7 @@ proc attnRelay(north <-chan int32, eastIn <-chan int32, westOut chan<- int32, we
 	}
 	recvWest := func() [dModel]float64 {
 		var v [dModel]float64
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			var bits int32
 			westIn -> bits
 			v[i] = f32val(bits)
@@ -454,17 +454,17 @@ proc attnRelay(north <-chan int32, eastIn <-chan int32, westOut chan<- int32, we
 		return v
 	}
 	sendWest := func(v [dModel]float64) {
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			westOut <- f32bits(v[i])
 		}
 	}
 	sendEast := func(v [dModel]float64) {
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			eastOut <- f32bits(v[i])
 		}
 	}
 	sendSouth := func(v [dModel]float64) {
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			south <- f32bits(v[i])
 		}
 	}
@@ -473,7 +473,7 @@ proc attnRelay(north <-chan int32, eastIn <-chan int32, westOut chan<- int32, we
 	cols := bilink.NumCols()
 	bilink.Screenf("attn relay ready at col %d", c)
 
-	for gen := 0; gen < generations; gen++ {
+	for gen := range generations {
 		myVec := recvNorth()
 
 		for r := cols - 1; r >= 1; r-- {
@@ -517,7 +517,7 @@ proc attnRelay(north <-chan int32, eastIn <-chan int32, westOut chan<- int32, we
 proc attnRowEnd(north <-chan int32, westOut chan<- int32, westIn <-chan int32, south chan<- int32) {
 	recvNorth := func() [dModel]float64 {
 		var v [dModel]float64
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			var bits int32
 			north -> bits
 			v[i] = f32val(bits)
@@ -526,7 +526,7 @@ proc attnRowEnd(north <-chan int32, westOut chan<- int32, westIn <-chan int32, s
 	}
 	recvWest := func() [dModel]float64 {
 		var v [dModel]float64
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			var bits int32
 			westIn -> bits
 			v[i] = f32val(bits)
@@ -534,19 +534,19 @@ proc attnRowEnd(north <-chan int32, westOut chan<- int32, westIn <-chan int32, s
 		return v
 	}
 	sendWest := func(v [dModel]float64) {
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			westOut <- f32bits(v[i])
 		}
 	}
 	sendSouth := func(v [dModel]float64) {
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			south <- f32bits(v[i])
 		}
 	}
 
 	bilink.Screenf("attn row-end ready at col %d", bilink.Col())
 
-	for gen := 0; gen < generations; gen++ {
+	for gen := range generations {
 		myVec := recvNorth()
 		time.Sleep(hopDelay)
 		sendWest(myVec)
@@ -570,7 +570,7 @@ proc attnRowEnd(north <-chan int32, westOut chan<- int32, westIn <-chan int32, s
 proc ffnStage(north <-chan int32, south chan<- int32) {
 	recvNorth := func() [dModel]float64 {
 		var v [dModel]float64
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			var bits int32
 			north -> bits
 			v[i] = f32val(bits)
@@ -578,14 +578,14 @@ proc ffnStage(north <-chan int32, south chan<- int32) {
 		return v
 	}
 	sendSouth := func(v [dModel]float64) {
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			south <- f32bits(v[i])
 		}
 	}
 
 	bilink.Screenf("ffn ready at col %d", bilink.Col())
 
-	for gen := 0; gen < generations; gen++ {
+	for range generations {
 		resid1 := recvNorth()
 		resid2 := add4(resid1, feedForward(resid1))
 		time.Sleep(hopDelay)
@@ -604,7 +604,7 @@ proc ffnStage(north <-chan int32, south chan<- int32) {
 proc outputStage(north <-chan int32) {
 	recvNorth := func() [dModel]float64 {
 		var v [dModel]float64
-		for i := 0; i < dModel; i++ {
+		for i := range dModel {
 			var bits int32
 			north -> bits
 			v[i] = f32val(bits)
@@ -615,7 +615,7 @@ proc outputStage(north <-chan int32) {
 	c := bilink.Col()
 	bilink.Screenf("output ready at col %d", c)
 
-	for gen := 0; gen < generations; gen++ {
+	for gen := range generations {
 		resid2 := recvNorth()
 		predicted := argmax4(outputLogits(resid2))
 		bilink.Screenf("gen %d: col %d -> %q", gen, c, wordAt(predicted))

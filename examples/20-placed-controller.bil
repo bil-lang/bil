@@ -46,7 +46,7 @@ const hopDelay = 150 * time.Millisecond
 proc controller(eastOut chan<- int32, eastIn <-chan int32) {
 	cols := bilink.NumCols()
 	bilink.Screenf("controller ready, %d cols", cols)
-	for round := 0; round < rounds; round++ {
+	for round := range rounds {
 		time.Sleep(hopDelay)
 		eastOut <- int32(round)
 		var v int32
@@ -61,7 +61,7 @@ proc controller(eastOut chan<- int32, eastIn <-chan int32) {
 // west and reflecting straight back west.
 proc rowEnd(westIn <-chan int32, westOut chan<- int32) {
 	bilink.Screenf("row-end ready")
-	for round := 0; round < rounds; round++ {
+	for round := range rounds {
 		var v int32
 		westIn -> v
 		bilink.Screenf("round %d: got %d, reflecting", round, v)
@@ -77,7 +77,7 @@ proc rowEnd(westIn <-chan int32, westOut chan<- int32) {
 // bidirectionally, so each gets two directional parameters.
 proc relay(westIn <-chan int32, eastOut chan<- int32, eastIn <-chan int32, westOut chan<- int32) {
 	bilink.Screenf("relay ready")
-	for round := 0; round < rounds; round++ {
+	for range rounds {
 		var v int32
 		westIn -> v
 		eastOut <- v
