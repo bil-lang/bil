@@ -894,15 +894,22 @@ func (t *transformer) findInterfaceImplementations(methodName string) []string {
 // tagged union into a scoped block: a Go type switch over valSrc's
 // dynamic type, sending the matching variant's small integer tag
 // (its position in u.variants) followed by its own flattened leaves, in
-// shape order -- the exact inverse of emitLinkRecvUnion. The default case
-// is unreachable in a correctly-typed program (every value ever stored in
-// a placed channel of this interface type must be one of u.variants,
-// since Go's own type system already enforces that at the call site), but
-// is emitted anyway rather than assumed away, matching this file's
-// general stance of never leaving a generated switch non-exhaustive.
+// shape order -- the exact inverse of emitLinkRecvUnion. valSrc is
+// explicitly converted to the interface type first: Go's type-switch
+// guard requires an interface-typed operand, which a bare
+// concretely-typed expression (`resultOut <- Value{Total: total}`, valSrc
+// = "Value{Total: total}", statically typed Value, not Result) isn't on
+// its own -- confirmed directly (`(Value{...}).(type)` is rejected by the
+// compiler as "not an interface") -- while an already-interface-typed
+// variable converts to itself for free. The default case is unreachable
+// in a correctly-typed program (every value ever stored in a placed
+// channel of this interface type must be one of u.variants, since Go's
+// own type system already enforces that at the call site), but is
+// emitted anyway rather than assumed away, matching this file's general
+// stance of never leaving a generated switch non-exhaustive.
 func (t *transformer) emitLinkSendUnion(idxSrc, valSrc string, u *unionShape) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "{\nswitch bilSendVal := (%s).(type) {\n", valSrc)
+	fmt.Fprintf(&b, "{\nswitch bilSendVal := %s(%s).(type) {\n", u.ifaceName, "("+valSrc+")")
 	for tag, v := range u.variants {
 		fmt.Fprintf(&b, "case %s:\n", v.name)
 		fmt.Fprintf(&b, "bilink.Send(%s, %d)\n", idxSrc, tag)

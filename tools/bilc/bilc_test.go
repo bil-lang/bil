@@ -845,7 +845,7 @@ func main() {
 		"case 1:",
 		"var bilRecvVal Warn",
 		`panic("bilink: unrecognized LogMsg tag")`,
-		"switch bilSendVal := (v).(type) {",
+		"switch bilSendVal := LogMsg((v)).(type) {",
 		"case Info:",
 		"bilink.Send(1, 0)",
 		"bilink.Send(1, int32(bilSendVal.Code))",

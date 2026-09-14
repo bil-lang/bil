@@ -1,0 +1,191 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+//
+// A tagged-union placed-channel demo on the WASM-worker grid emulator
+// (../../emulator, a sibling repo — see its README and STRATEGY.md's
+// "Emulator architecture" note): the exact same controller/relay/rowEnd
+// row-0 topology as Example 20 (placed-controller), but where Example 20
+// relays a single bare int32 round-trip, this one relays two real
+// protocol types — Cmd going east, Result coming back west — each a
+// closed tagged union (the same marker-method idiom Example 5's own
+// non-placed LogMsg channel already uses), not a hand-packed integer.
+//
+// Cmd/Result cross the physical link exactly like a plain struct payload
+// does (see Example 22's [dModel]float64 channels): bilc resolves each
+// interface's implementing variants at compile time, in file order, and
+// generates one small integer tag per variant plus that variant's own
+// field encoding — a Go type switch on send, a tag switch on receive —
+// so `cmdOut <- cmd`/`cmdIn -> cmd` below cost nothing at runtime beyond
+// what the equivalent hand-written switch would.
+//
+// `relay` never inspects a Cmd or Result's variant at all — it declares
+// its own four parameters as the plain interface types and forwards
+// whatever it received, unexamined, exactly like Example 20's relay
+// forwards its int32 unexamined. Only `controller` (which builds each
+// Cmd and interprets each Result) and `actuator` (the reverse) ever
+// type-switch on them — and both do it with a plain two-step `chan ->
+// v` followed by an ordinary Go `switch v := v.(type)`, not the fused
+// `switch chan :-> v.(type)` sugar, which still only ever works on a
+// real (non-placed) Go channel; that restriction is unchanged by this
+// feature.
+
+package main
+
+const rounds = 5
+
+// Cmd is the controller-to-actuator protocol: a small, closed set of
+// instructions the actuator applies to its own running total.
+type Cmd interface {
+	isCmd()
+}
+
+type Add struct {
+	N int
+}
+
+func (Add) isCmd() {}
+
+type Scale struct {
+	Factor float64
+}
+
+func (Scale) isCmd() {}
+
+type Reset struct{}
+
+func (Reset) isCmd() {}
+
+// Result is the actuator-to-controller protocol: either the running
+// total after applying a Cmd, or a rejection when a Cmd's own value
+// would do something degenerate (Scale by exactly zero would erase the
+// total, indistinguishable from a real "set to zero" -- rejected
+// instead of silently applied).
+type Result interface {
+	isResult()
+}
+
+type Value struct {
+	Total int
+}
+
+func (Value) isResult() {}
+
+type Rejected struct {
+	Reason int
+}
+
+func (Rejected) isResult() {}
+
+// cmds is the fixed sequence controller issues, one per round -- sized
+// by rounds itself, so an element added or removed here without updating
+// rounds to match is a compile error, not a silent short read on
+// actuator's side.
+var cmds = [rounds]Cmd{
+	Add{N: 5},
+	Scale{Factor: 2},
+	Scale{Factor: 0},
+	Reset{},
+	Add{N: 9},
+}
+
+// controller runs at (0,0): issues each round's Cmd east, then waits for
+// that round's Result to come back before issuing the next.
+proc controller(cmdOut chan<- Cmd, resultIn <-chan Result) {
+	bilink.Screenf("controller ready, %d cols", bilink.NumCols())
+	for _, cmd := range cmds {
+		cmdOut <- cmd
+		var res Result
+		resultIn -> res
+		switch r := res.(type) {
+		case Value:
+			bilink.Screenf("round: total now %d", r.Total)
+		case Rejected:
+			bilink.Screenf("round: rejected (reason %d)", r.Reason)
+		}
+	}
+	bilink.Screenf("controller done")
+	stop
+}
+
+// actuator runs at (0,cols-1): the row's far end, applying each Cmd it
+// receives to its own running total and reporting back what happened.
+proc actuator(cmdIn <-chan Cmd, resultOut chan<- Result) {
+	bilink.Screenf("actuator ready")
+	total := 0
+	for range rounds {
+		var cmd Cmd
+		cmdIn -> cmd
+		switch c := cmd.(type) {
+		case Add:
+			total += c.N
+			resultOut <- Value{Total: total}
+		case Scale:
+			if c.Factor == 0 {
+				resultOut <- Rejected{Reason: 1}
+				continue
+			}
+			total = int(float64(total) * c.Factor)
+			resultOut <- Value{Total: total}
+		case Reset:
+			total = 0
+			resultOut <- Value{Total: total}
+		}
+	}
+	bilink.Screenf("actuator done, total=%d", total)
+	stop
+}
+
+// relay runs on every other row-0 processor, forwarding each Cmd east
+// and each Result west without ever looking at which variant it's
+// carrying -- both west and east are used bidirectionally here (Cmd
+// eastbound, Result westbound on the very same pair of physical links),
+// so each gets two directional parameters, exactly like Example 20's
+// relay.
+proc relay(westIn <-chan Cmd, eastOut chan<- Cmd, eastIn <-chan Result, westOut chan<- Result) {
+	bilink.Screenf("relay ready")
+	for range rounds {
+		var cmd Cmd
+		westIn -> cmd
+		eastOut <- cmd
+		var res Result
+		eastIn -> res
+		westOut <- res
+	}
+	bilink.Screenf("relay done")
+	stop
+}
+
+// idle runs everywhere off row 0 -- nothing to do in this demo, just
+// confirming placement dispatched here correctly at all.
+proc idle() {
+	bilink.Screenf("idle -- not part of row 0")
+	stop
+}
+
+func main() {
+	cols := bilink.NumCols()
+
+	placed par {
+		processor(0, 0) {
+			place cmdOut at link[1].out
+			place resultIn at link[1].in
+			controller(cmdOut, resultIn)
+		}
+		processor(0, cols-1) {
+			place cmdIn at link[3].in
+			place resultOut at link[3].out
+			actuator(cmdIn, resultOut)
+		}
+		processor(0, *) {
+			place westIn at link[3].in
+			place eastOut at link[1].out
+			place eastIn at link[1].in
+			place westOut at link[3].out
+			relay(westIn, eastOut, eastIn, westOut)
+		}
+		processor(*, *) {
+			idle()
+		}
+	}
+}
