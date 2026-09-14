@@ -23,10 +23,13 @@ import (
 func emuMain(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("emu", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	// No backtick-quoted words in these usage strings -- flag.PrintDefaults
+	// treats a single back-quoted substring as the flag's value-type name
+	// (e.g. would print "-cols placed par" instead of "-cols int").
 	rows := fs.Int("rows", 0, "grid rows (0 = auto: 1 for a plain chan/proc/par program,"+
 		" or the smallest grid that gives every placed processor its own node"+
-		" for a `placed par` program -- see -cols)")
-	cols := fs.Int("cols", 0, "grid cols (0 = auto, see -rows). NOTE: forcing a `placed par`"+
+		" for a placed-par program -- see -cols)")
+	cols := fs.Int("cols", 0, "grid cols (0 = auto, see -rows). NOTE: forcing a placed-par"+
 		" program onto too small a grid can silently under-exercise it -- e.g."+
 		" processor(0,0) and processor(0,cols-1) collide into the same generated"+
 		" Go switch case when cols=1, and only the first match ever fires")
@@ -256,21 +259,30 @@ func emuCmd(src string, rows, cols int, addr string, openBrowser bool, stdout, s
 	return 0
 }
 
-// findEmulatorDir locates a sibling ../emulator checkout relative to the
-// current working directory -- the same convention emulator/README.md's
-// own Install section and every build command in this ecosystem already
-// assumes. Deliberately no env var or config override: one convention,
-// consistently.
+// findEmulatorDir locates a sibling emulator checkout next to the bil repo
+// -- the same convention emulator/README.md's own Install section and
+// every build command in this ecosystem already assumes -- by walking
+// upward from the current working directory (e.g. running `bil emu` from
+// inside examples/ must still find it) until some ancestor's own sibling
+// "emulator" directory has a go.mod. Deliberately no env var or config
+// override: one convention, consistently.
 func findEmulatorDir() (string, error) {
-	cwd, err := os.Getwd()
+	dir, err := os.Getwd()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(cwd, "..", "emulator")
-	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
-		return "", fmt.Errorf("bil emu: no sibling emulator checkout found at %s (see emulator/README.md's Install section)", dir)
+	for {
+		candidate := filepath.Join(dir, "..", "emulator")
+		if _, err := os.Stat(filepath.Join(candidate, "go.mod")); err == nil {
+			return candidate, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break // reached filesystem root without finding one
+		}
+		dir = parent
 	}
-	return dir, nil
+	return "", fmt.Errorf("bil emu: no sibling emulator checkout found near %s (see emulator/README.md's Install section)", dir)
 }
 
 // goBuildWasm builds the Go package in dir (a directory containing exactly

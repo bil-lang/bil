@@ -33,23 +33,37 @@ type deployMatch struct {
 // handful of rows/cols), while keeping a runaway search bounded.
 const maxGridSearch = 32
 
-// concreteRC/concreteID are the two shapes of "explicit, must-be-distinct"
-// leaf position inferGridSize's search cares about -- see its own doc
-// comment for why default/wildcard leaves are excluded entirely.
-type concreteRC struct{ rowExpr, colExpr string }
+// rcLeaf is an explicit (non-default, non-id) leaf's row/col match,
+// tracking which axes (if any) are wildcarded (`processor(0, *)`) --
+// distinct from a fully-resolved position, since whether an axis is
+// wildcarded matters for collision detection (see fits).
+type rcLeaf struct {
+	rowExpr, colExpr string
+	rowWild, colWild bool
+}
+
+// concreteID is a flat processor(ID)-form leaf's id expression.
 type concreteID struct{ idExpr string }
 
 // inferGridSize computes the smallest rows x cols grid at which every
-// explicit (non-default, non-wildcard) leaf in a DeployManifest resolves
-// to its own distinct (row, col) cell -- see the emu command's design
-// notes for why this is computed rather than guessed or required as a
-// flag. A leaf wildcarding one axis (`processor(0, *)`) or fully wild
-// (recorded as Default) never needs a distinct cell of its own: by
-// construction it's meant to cover whatever a more specific leaf doesn't,
-// exactly like the generated Go switch's own case ordering already
-// handles today. Leaves are otherwise addressed by flat id
-// (`processor(ID)`, checked against id values directly, not converted to
-// row/col) or by row/col pair.
+// explicit leaf in a DeployManifest is unambiguously reachable -- see the
+// emu command's design notes for why this is computed rather than
+// guessed or required as a flag.
+//
+// A `default` leaf never needs a distinct cell: by construction it
+// covers whatever no more specific leaf claims. A leaf that wildcards
+// one axis (`processor(0, *)`) is *meant* to overlap with a more
+// specific leaf sharing its other axis (e.g. `processor(0,0)`) -- that's
+// the same "catch the rest" layering as `default`, not a collision, so
+// two leaves with *different* wildcard patterns are never compared
+// against each other at all. The real bug this guards against is two
+// leaves with the *same* wildcard pattern whose concrete axes evaluate
+// to the same value -- e.g. `processor(*, 0)` and `processor(*,
+// cols-1)` both wildcard row and differ only in col, so they collide
+// exactly when cols=1 (both resolve to column 0) and the first-declared
+// one silently wins for every row, the second never firing at all.
+// Leaves are otherwise addressed by flat id (`processor(ID)`, checked
+// against id values directly, never converted to row/col).
 //
 // Returns an error only if no size within maxGridSearch works, or a
 // match/id expression fails to parse/evaluate -- both should be
@@ -60,7 +74,7 @@ func inferGridSize(manifest []byte) (rows, cols int, err error) {
 		return 0, 0, fmt.Errorf("parsing deploy manifest: %w", err)
 	}
 
-	var byRC []concreteRC
+	var byRC []rcLeaf
 	var byID []concreteID
 	for _, leaf := range dm.Leaves {
 		m := leaf.Match
@@ -69,16 +83,27 @@ func inferGridSize(manifest []byte) (rows, cols int, err error) {
 			continue
 		case m.ID != "":
 			byID = append(byID, concreteID{m.ID})
-		case m.Row == "*" || m.Col == "*":
-			continue // partial wildcard -- covers whatever a more specific leaf doesn't
 		default:
-			byRC = append(byRC, concreteRC{m.Row, m.Col})
+			byRC = append(byRC, rcLeaf{
+				rowExpr: m.Row, colExpr: m.Col,
+				rowWild: m.Row == "*", colWild: m.Col == "*",
+			})
 		}
 	}
 	if len(byRC) == 0 && len(byID) == 0 {
 		return 1, 1, nil // nothing explicit to distinguish -- e.g. a placed-par with only a default clause
 	}
 
+	// Prefer the emulator page's own long-standing default (6x7,
+	// static/index.html) when it's collision-free -- the smallest
+	// distinguishing grid is often correct but visually thin (e.g. a
+	// 3-role row-0 demo's minimum is 1x2, which never actually shows
+	// its relay/idle roles at all). Only search for something else when
+	// a program's own placement genuinely needs more than 6x7.
+	const defaultRows, defaultCols = 6, 7
+	if fits(byRC, byID, defaultRows, defaultCols) {
+		return defaultRows, defaultCols, nil
+	}
 	for cols := 1; cols <= maxGridSearch; cols++ {
 		for rows := 1; rows <= maxGridSearch; rows++ {
 			if fits(byRC, byID, rows, cols) {
@@ -89,25 +114,42 @@ func inferGridSize(manifest []byte) (rows, cols int, err error) {
 	return 0, 0, fmt.Errorf("no grid up to %dx%d distinguishes every placed processor -- pass -rows/-cols explicitly", maxGridSearch, maxGridSearch)
 }
 
-func fits(byRC []concreteRC, byID []concreteID, rows, cols int) bool {
-	seen := map[[2]int]bool{}
+func fits(byRC []rcLeaf, byID []concreteID, rows, cols int) bool {
+	type resolved struct {
+		row, col         int
+		rowWild, colWild bool
+	}
+	resolvedLeaves := make([]resolved, 0, len(byRC))
 	for _, l := range byRC {
-		r, err := evalGridExpr(l.rowExpr, rows, cols)
-		if err != nil {
-			return false
+		var r, c int
+		if !l.rowWild {
+			v, err := evalGridExpr(l.rowExpr, rows, cols)
+			if err != nil || v < 0 || v >= rows {
+				return false
+			}
+			r = v
 		}
-		c, err := evalGridExpr(l.colExpr, rows, cols)
-		if err != nil {
-			return false
+		if !l.colWild {
+			v, err := evalGridExpr(l.colExpr, rows, cols)
+			if err != nil || v < 0 || v >= cols {
+				return false
+			}
+			c = v
 		}
-		if r < 0 || r >= rows || c < 0 || c >= cols {
-			return false
+		resolvedLeaves = append(resolvedLeaves, resolved{r, c, l.rowWild, l.colWild})
+	}
+	for i := range resolvedLeaves {
+		for j := i + 1; j < len(resolvedLeaves); j++ {
+			a, b := resolvedLeaves[i], resolvedLeaves[j]
+			if a.rowWild != b.rowWild || a.colWild != b.colWild {
+				continue // different specificity -- intentional layering, not a collision
+			}
+			rowSame := a.rowWild || a.row == b.row
+			colSame := a.colWild || a.col == b.col
+			if rowSame && colSame {
+				return false // same wildcard pattern, indistinguishable on every concrete axis
+			}
 		}
-		key := [2]int{r, c}
-		if seen[key] {
-			return false
-		}
-		seen[key] = true
 	}
 	seenID := map[int]bool{}
 	for _, l := range byID {
