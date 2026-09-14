@@ -1202,12 +1202,28 @@ func (t *transformer) buildFuncBodyIndex() {
 	}
 }
 
-// parsePlaceDecl parses one `place NAME at link[EXPR]` statement at a
-// statement start (lo must satisfy isStmtStart), bounded by hi. Shared by
+// parsePlaceDecl parses one `place NAME at link[EXPR]` statement --
+// optionally `place NAME at link[EXPR].in` or `.out` -- at a statement
+// start (lo must satisfy isStmtStart), bounded by hi. Shared by
 // checkPlaceOnlyInsidePlacedPar (detecting the shape anywhere in the file)
 // and parsePlacedCallLeaf (requiring and extracting it inside a placed-par
 // clause leaf) — replaces the standalone matchPlaceAliasDecl this file used
 // to have back when `place` could legally appear inside a proc's own body.
+//
+// The `.in`/`.out` suffix is purely documentation: it says which half of
+// the physical link this name is for, right next to the link index
+// itself, rather than leaving a reader to infer direction solely from
+// which of the callee's two parameters (one `chan<-`, one `<-chan`) this
+// name happens to be passed to at the placed call. bilc parses and
+// discards it -- idxExpr is the same either way -- deliberately without
+// cross-checking it against the callee's declared parameter direction:
+// a real check would need to run after paramNamesAndDirections has
+// resolved the call (parsePlaceDecl runs standalone, before any of
+// that), and would just be re-deriving what the parameter's own type
+// already guarantees at compile time via Go's own type-checker (a
+// `chan<-` parameter can never receive, a `<-chan` can never send) --
+// so a mismatched `.in`/`.out` is misleading to a reader but not a
+// latent bug the way a wrong link *index* would be.
 func (t *transformer) parsePlaceDecl(lo, hi int) (name, idxExpr string, pos token.Pos, end int, ok bool) {
 	if !t.isStmtStart(lo) {
 		return "", "", 0, 0, false
@@ -1224,7 +1240,12 @@ func (t *transformer) parsePlaceDecl(lo, hi int) (name, idxExpr string, pos toke
 	open := lo + 4
 	close := matchBracket(t.toks, open)
 	idxExpr = strings.TrimSpace(string(t.src[t.off(t.toks[open+1].pos):t.off(t.toks[close].pos)]))
-	return name, idxExpr, pos, close + 1, true
+	end = close + 1
+	if end+1 < hi && t.toks[end].tok == token.PERIOD && t.toks[end+1].tok == token.IDENT &&
+		(t.toks[end+1].lit == "in" || t.toks[end+1].lit == "out") {
+		end += 2
+	}
+	return name, idxExpr, pos, end, true
 }
 
 // checkPlaceOnlyInsidePlacedPar rejects any `place NAME at link[EXPR]`

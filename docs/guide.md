@@ -1,10 +1,10 @@
 ### What bilc does with placement
 
-A `.bil` source file expresses placement with two constructs: a `placed par { processor(...) {...} ... processor(*, *) {...} }` block naming which role runs where, and `place NAME at link[EXPR]` statements in the calling clause binding one of that role's own declared channel parameters to a physical link. There is no separate `default` construct — it was removed as exactly, only ever, a third spelling of the fully-wild wildcard forms below. bilc's action on these two constructs is two rewrites plus two generated artifacts.
+A `.bil` source file expresses placement with two constructs: a `placed par { processor(...) {...} ... processor(*, *) {...} }` block naming which role runs where, and `place NAME at link[EXPR].in`/`.out` statements in the calling clause binding one of that role's own declared channel parameters to a physical link. There is no separate `default` construct — it was removed as exactly, only ever, a third spelling of the fully-wild wildcard forms below. There is also no raw, unplaced `link[idx]` usage left in any example — that style (one proc, same on every node, branching internally on its own position) is a throwback to before `placed par` existed; every current example expresses heterogeneous roles through placement instead. bilc's action on these two constructs is two rewrites plus two generated artifacts.
 
 **Rewrite 1 — `placed par` becomes a runtime switch.** Each `processor(id)` clause becomes `case bilink.ID() == id:`; each `processor(r, c)` clause becomes `case bilink.Row() == r && bilink.Col() == c:`. Either slot of the two-arg form may instead be a literal `*` wildcard: `processor(1, *)` matches every column of row 1 and compiles to just `case bilink.Row() == 1:` (only the pinned dimension is compared); `processor(*, 0)` matches every row's column 0 and compiles to `case bilink.Col() == 0:`. A clause that wildcards both dimensions — `processor(*)` or `processor(*, *)` — matches every node and compiles to Go's own `default:`, and must be the block's last clause, since nothing after it could ever be reached. The result is one ordinary `switch {}` in the compiled program — never a `par(...)`, never goroutines. Every node's Worker runs the exact same compiled program; which branch a given node takes depends entirely on `bilink.Row()/Col()/ID()`.
 
-**Rewrite 2 — `place NAME at link[EXPR]` becomes nothing at all.** It's compile-time-only, and it lives at the *call site*, not inside the called proc's own body: a proc declares ordinary directional Go channel parameters (`toEast chan<- int32`), and the `processor(...)` clause that calls it writes `place toEast at link[1]; controller(toEast)` to bind that parameter. Every reference to `toEast` inside `controller`'s own body is rewritten straight to the equivalent `bilink.Send`/`Recv` call on link 1 — the Go channel value is never actually touched — so the call site itself passes a bare `nil` for that argument (`controller(nil)`), just enough to satisfy Go's own type-checker.
+**Rewrite 2 — `place NAME at link[EXPR].in`/`.out` becomes nothing at all.** It's compile-time-only, and it lives at the *call site*, not inside the called proc's own body: a proc declares ordinary directional Go channel parameters (`eastOut chan<- int32`), and the `processor(...)` clause that calls it writes `place eastOut at link[1].out; controller(eastOut)` to bind that parameter. Every reference to `eastOut` inside `controller`'s own body is rewritten straight to the equivalent `bilink.Send`/`Recv` call on link 1 — the Go channel value is never actually touched — so the call site itself passes a bare `nil` for that argument (`controller(nil)`), just enough to satisfy Go's own type-checker. The `.in`/`.out` suffix is documentation only: it says which half of the physical link this name is for, right next to the index itself, rather than leaving a reader to infer direction solely from which of the callee's two parameters this name happens to be passed to. bilc parses and discards it — it's never cross-checked against the callee's declared parameter direction, since a real check would just be re-deriving what that parameter's own type already guarantees at compile time via Go's own type-checker.
 
 **Artifact 1 — one standalone Go source per role.** `RoleBinaries` emits `roles/<name>/main.go` for every distinct proc a `placed par` block calls — the whole file, unchanged, except the placed-par block compiles to a single hardcoded call to just that one role instead of the switch. Every other declaration is still emitted exactly as normal; Go's own linker, not bilc, drops whatever isn't reachable from that one call. (Measured directly: this barely shrinks the compiled `.wasm` — Go's own runtime dominates the binary, not the role code — so its real value is letting a host fetch each distinct role once instead of redundantly re-fetching one shared binary per node; see `../emulator/README.md`'s "Host and boot cascade".)
 
@@ -15,37 +15,39 @@ Here's the real, current placement block from `examples/22-pipeline-transformer.
 ```bil
 placed par {
     processor(1, 0) {
-        place eastOut at link[1]
-        place eastIn at link[1]
-        attnController(eastOut, eastIn)
+        place north at link[0].in
+        place eastIn at link[1].in
+        place eastOut at link[1].out
+        place south at link[2].out
+        attnController(north, eastIn, eastOut, south)
     }
     processor(1, cols-1) {
-        place north at link[0]
-        place westOut at link[3]
-        place westIn at link[3]
-        place south at link[2]
+        place north at link[0].in
+        place westOut at link[3].out
+        place westIn at link[3].in
+        place south at link[2].out
         attnRowEnd(north, westOut, westIn, south)
     }
     processor(0, *) {
-        place south at link[2]
+        place south at link[2].out
         embedStage(south)
     }
     processor(1, *) {
-        place north at link[0]
-        place eastIn at link[1]
-        place westOut at link[3]
-        place westIn at link[3]
-        place eastOut at link[1]
-        place south at link[2]
+        place north at link[0].in
+        place eastIn at link[1].in
+        place westOut at link[3].out
+        place westIn at link[3].in
+        place eastOut at link[1].out
+        place south at link[2].out
         attnRelay(north, eastIn, westOut, westIn, eastOut, south)
     }
     processor(2, *) {
-        place north at link[0]
-        place south at link[2]
+        place north at link[0].in
+        place south at link[2].out
         ffnStage(north, south)
     }
     processor(3, *) {
-        place north at link[0]
+        place north at link[0].in
         outputStage(north)
     }
     processor(*, *) {

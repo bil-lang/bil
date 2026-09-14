@@ -32,13 +32,14 @@
 // prediction s east, and it walks the same relay chain forwards until
 // it reaches column s. See `runTransformer` for the actual model.
 //
-// `place NAME at link[EXPR]` lives in `main()`'s `placed par` clauses,
-// not inside controller/rowEnd/relay's own bodies (see Example 20):
-// each proc below only ever declares and uses ordinary directional
-// channel parameters -- no `place`/`link` anywhere in them. Gather and
-// scatter run in opposite directions over the same two physical links,
-// so each link becomes two directional parameters (one per direction),
-// both `place`d onto the same link index in main().
+// `place NAME at link[EXPR].in`/`.out` lives in `main()`'s `placed par`
+// clauses, not inside controller/rowEnd/relay's own bodies (see
+// Example 20): each proc below only ever declares and uses ordinary
+// directional channel parameters -- no `place`/`link` anywhere in
+// them. Gather and scatter run in opposite directions over the same
+// two physical links, so each link becomes two directional parameters
+// (one per direction), both `place`d onto the same link index in
+// main() but opposite `.in`/`.out` suffix.
 
 package main
 
@@ -279,7 +280,7 @@ func runTransformer(tokens []int) []int {
 // controller runs at exactly one processor, (0,0): gathers every row-0
 // column's token, runs the transformer block once the whole row has
 // arrived, then scatters each column's prediction back out.
-proc controller(toEast chan<- int32, fromEast <-chan int32) {
+proc controller(eastOut chan<- int32, eastIn <-chan int32) {
 	cols := bilink.NumCols()
 	bilink.Screenf("controller ready, %d cols", cols)
 
@@ -290,7 +291,7 @@ proc controller(toEast chan<- int32, fromEast <-chan int32) {
 		for r := cols - 1; r >= 1; r-- {
 			time.Sleep(hopDelay)
 			var v int32
-			fromEast -> v
+			eastIn -> v
 			tokens[r] = int(v)
 		}
 
@@ -298,7 +299,7 @@ proc controller(toEast chan<- int32, fromEast <-chan int32) {
 
 		for s := 1; s < cols; s++ {
 			time.Sleep(hopDelay)
-			toEast <- int32(predicted[s])
+			eastOut <- int32(predicted[s])
 		}
 
 		bilink.Screenf("gen %d: in=%q out=%q", gen, wordAt(tokens[0]), wordAt(predicted[0]))
@@ -313,17 +314,17 @@ proc controller(toEast chan<- int32, fromEast <-chan int32) {
 // destination for exactly one scatter round -- everything else about
 // gather/scatter happens strictly west of it, so unlike relay it
 // needs no round loop at all.
-proc rowEnd(toWest chan<- int32, fromWest <-chan int32) {
+proc rowEnd(westOut chan<- int32, westIn <-chan int32) {
 	c := bilink.NumCols() - 1
 	bilink.Screenf("row-end ready at col %d", c)
 
 	for gen := 0; gen < generations; gen++ {
 		myTok := (c + gen) % vocabSize
 		time.Sleep(hopDelay)
-		toWest <- int32(myTok)
+		westOut <- int32(myTok)
 
 		var predicted int32
-		fromWest -> predicted
+		westIn -> predicted
 		bilink.Screenf("gen %d: %q -> %q", gen, wordAt(myTok), wordAt(int(predicted)))
 	}
 
@@ -339,7 +340,7 @@ proc rowEnd(toWest chan<- int32, fromWest <-chan int32) {
 // just run `cols-1` times per generation instead of once. Both
 // physical links (east, west) are used in both directions across the
 // two phases, so each becomes a pair of directional parameters.
-proc relay(fromEast <-chan int32, toWest chan<- int32, fromWest <-chan int32, toEast chan<- int32) {
+proc relay(eastIn <-chan int32, westOut chan<- int32, westIn <-chan int32, eastOut chan<- int32) {
 	cols := bilink.NumCols()
 	c := bilink.Col()
 	bilink.Screenf("relay ready at col %d", c)
@@ -351,12 +352,12 @@ proc relay(fromEast <-chan int32, toWest chan<- int32, fromWest <-chan int32, to
 			switch {
 			case r == c:
 				time.Sleep(hopDelay)
-				toWest <- int32(myTok)
+				westOut <- int32(myTok)
 			case r > c:
 				var v int32
-				fromEast -> v
+				eastIn -> v
 				time.Sleep(hopDelay)
-				toWest <- v
+				westOut <- v
 			}
 		}
 
@@ -365,12 +366,12 @@ proc relay(fromEast <-chan int32, toWest chan<- int32, fromWest <-chan int32, to
 		for s := 1; s < cols; s++ {
 			switch {
 			case s == c:
-				fromWest -> predicted
+				westIn -> predicted
 			case s > c:
 				var v int32
-				fromWest -> v
+				westIn -> v
 				time.Sleep(hopDelay)
-				toEast <- v
+				eastOut <- v
 			}
 		}
 
@@ -392,21 +393,21 @@ func main() {
 
 	placed par {
 		processor(0, 0) {
-			place toEast at link[1]
-			place fromEast at link[1]
-			controller(toEast, fromEast)
+			place eastOut at link[1].out
+			place eastIn at link[1].in
+			controller(eastOut, eastIn)
 		}
 		processor(0, cols-1) {
-			place toWest at link[3]
-			place fromWest at link[3]
-			rowEnd(toWest, fromWest)
+			place westOut at link[3].out
+			place westIn at link[3].in
+			rowEnd(westOut, westIn)
 		}
 		processor(0, *) {
-			place fromEast at link[1]
-			place toWest at link[3]
-			place fromWest at link[3]
-			place toEast at link[1]
-			relay(fromEast, toWest, fromWest, toEast)
+			place eastIn at link[1].in
+			place westOut at link[3].out
+			place westIn at link[3].in
+			place eastOut at link[1].out
+			relay(eastIn, westOut, westIn, eastOut)
 		}
 		processor(*, *) {
 			idle()

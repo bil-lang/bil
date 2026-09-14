@@ -61,16 +61,17 @@
 // (`processor(*)` or `processor(*, *)`) to be last: it's an identity
 // gate, so nothing after it could ever be reached.
 //
-// Channels: `place NAME at link[EXPR]` lives in the clause that calls a
-// proc, not inside the proc's own body -- it binds one of that proc's
-// declared, typed channel parameters (`chan<- int32` for a send-only
-// direction, `<-chan int32` for receive-only) to a physical link. A
-// proc that uses one physical link for both directions (the attention
-// row's east/west links) gets two directional parameters for it, both
-// `place`d at the same link index -- one real Go channel can't be used
-// both ways. Every proc below is consequently ordinary channel-based
-// Bil with no `link`/`place` of its own, exactly like Example 20's
-// controller/rowEnd/relay.
+// Channels: `place NAME at link[EXPR].in`/`.out` lives in the clause
+// that calls a proc, not inside the proc's own body -- it binds one of
+// that proc's declared, typed channel parameters (`chan<- int32` for a
+// send-only direction, `<-chan int32` for receive-only) to a physical
+// link, and the `.in`/`.out` suffix names which half of it. A proc
+// that uses one physical link for both directions (the attention row's
+// east/west links) gets two directional parameters for it, both
+// `place`d at the same link index but opposite suffix -- one real Go
+// channel can't be used both ways. Every proc below is consequently
+// ordinary channel-based Bil with no `link`/`place` of its own, exactly
+// like Example 20's controller/rowEnd/relay.
 
 package main
 
@@ -637,39 +638,39 @@ func main() {
 
 	placed par {
 		processor(1, 0) {
-			place north at link[0]
-			place eastIn at link[1]
-			place eastOut at link[1]
-			place south at link[2]
+			place north at link[0].in
+			place eastIn at link[1].in
+			place eastOut at link[1].out
+			place south at link[2].out
 			attnController(north, eastIn, eastOut, south)
 		}
 		processor(1, cols-1) {
-			place north at link[0]
-			place westOut at link[3]
-			place westIn at link[3]
-			place south at link[2]
+			place north at link[0].in
+			place westOut at link[3].out
+			place westIn at link[3].in
+			place south at link[2].out
 			attnRowEnd(north, westOut, westIn, south)
 		}
 		processor(0, *) {
-			place south at link[2]
+			place south at link[2].out
 			embedStage(south)
 		}
 		processor(1, *) {
-			place north at link[0]
-			place eastIn at link[1]
-			place westOut at link[3]
-			place westIn at link[3]
-			place eastOut at link[1]
-			place south at link[2]
+			place north at link[0].in
+			place eastIn at link[1].in
+			place westOut at link[3].out
+			place westIn at link[3].in
+			place eastOut at link[1].out
+			place south at link[2].out
 			attnRelay(north, eastIn, westOut, westIn, eastOut, south)
 		}
 		processor(2, *) {
-			place north at link[0]
-			place south at link[2]
+			place north at link[0].in
+			place south at link[2].out
 			ffnStage(north, south)
 		}
 		processor(3, *) {
-			place north at link[0]
+			place north at link[0].in
 			outputStage(north)
 		}
 		processor(*, *) {

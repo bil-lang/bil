@@ -462,6 +462,46 @@ func main() {
 	}
 }
 
+// TestPlaceDeclInOutSuffix checks that `place NAME at link[EXPR].in` and
+// `.out` parse identically to the bare `link[EXPR]` form -- the suffix
+// is documentation only, discarded during codegen, never cross-checked
+// against the callee's declared parameter direction (see
+// parsePlaceDecl's own doc comment for why).
+func TestPlaceDeclInOutSuffix(t *testing.T) {
+	src := []byte(`package main
+
+proc node(in <-chan int32, out chan<- int32) {
+	var v int32
+	in -> v
+	out <- v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place out2 at link[1].out
+			place in2 at link[1].in
+			node(in2, out2)
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "v = bilink.Recv(1)") {
+		t.Errorf("expected `in -> v` to rewrite to `v = bilink.Recv(1)`, got:\n%s", got)
+	}
+	if !strings.Contains(got, "bilink.Send(1, v)") {
+		t.Errorf("expected `out <- v` to rewrite to `bilink.Send(1, v)`, got:\n%s", got)
+	}
+	if strings.Contains(got, ".in") || strings.Contains(got, ".out") {
+		t.Errorf("expected the .in/.out suffix to be discarded entirely, got:\n%s", got)
+	}
+}
+
 // TestRoleBinaries checks that RoleBinaries emits one standalone,
 // syntactically valid Go file per distinct placed-par role, each with
 // its own main() calling only that role's proc -- and that every

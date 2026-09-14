@@ -6,22 +6,33 @@
 // (../../emulator, a sibling repo — see its README and
 // STRATEGY.md's "Emulator architecture" note): a counter ripples
 // east along each row, reflects at the last column, and ripples
-// back west. Every node runs this exact same proc, discovering its
-// own position and neighbours via the bilink package rather than
-// being told them — bilink.Row/Col/NumCols read state the emulator's
-// Worker bootstrap sets before this program starts.
+// back west.
 //
-// `link` is Bil's reserved index-addressed array of nearest-neighbour
-// links — not an ordinary channel, so `link[i] -> x` / `link[i] <- v`
-// compile to a genuine cross-Worker rendezvous (bilink.Recv/Send), not
-// an in-process Go channel op. link[1] is east and link[3] is west
-// below — that mapping is a convention owned entirely by the
-// emulator's topology layer (../../emulator/static/index.html's
-// buildTopology), not by bilc or bilink; a different topology would
-// number its links differently.
-// This mirrors ../../emulator/nodeprog/ripple/main.go, the
-// hand-written Go version of this same demo built during the
-// emulator's Phase A, now running as real compiled Bil instead.
+// Three roles, placed by column position and wildcarded across every
+// row: `origin` at column 0, `reflect` at the last column, `relay`
+// everywhere else. Row never matters here (the ripple is identical,
+// independent, on every row), so every clause below wildcards it with
+// `*` -- `processor(*, 0)`, `processor(*, cols-1)`, `processor(*, *)`
+// -- rather than naming a single row. This mirrors
+// ../../emulator/nodeprog/ripple/main.go, the hand-written Go version
+// of this same demo built during the emulator's Phase A, now running
+// as real compiled Bil instead, and it's the direct ancestor of
+// Example 20 (placed-controller)'s own controller/rowEnd/relay split
+// -- same three-role shape, generalized here to run identically on
+// every row instead of just row 0.
+//
+// `place NAME at link[EXPR].in`/`.out` lives in the `placed par` clause
+// that calls a role's proc, not inside the proc's own body -- it binds
+// one of that role's declared, typed channel parameters (`chan<-
+// int32` for a send-only direction, `<-chan int32` for receive-only)
+// to a physical link. The `.in`/`.out` suffix says which half of that
+// link this is, right next to the index itself, purely for a reader's
+// sake -- link[1] is east and link[3] is west below (a convention
+// owned by the emulator's topology layer, ../../emulator/static/index.html's
+// buildTopology, not by bilc or bilink; a different topology would
+// number its links differently), so `link[1].out` reads as "send
+// east" and `link[3].in` as "receive from west" without needing to
+// remember the mapping by heart.
 
 package main
 
@@ -35,62 +46,92 @@ const waves = 3
 // resolving instantly.
 const hopDelay = 150 * time.Millisecond
 
-proc node() {
-	r, c := bilink.Row(), bilink.Col()
-	cols := bilink.NumCols()
+// origin runs at column 0 of every row: originates each wave east,
+// then awaits its reflection back on the same physical link.
+proc origin(eastOut chan<- int32, eastIn <-chan int32) {
+	r := bilink.Row()
+	bilink.Screenf("(%d,0) ready", r)
 
-	bilink.Screenf("(%d,%d) ready", r, c)
-
-	if cols < 2 {
-		bilink.Screenf("(%d,%d) single column, nothing to ripple", r, c)
+	if bilink.NumCols() < 2 {
+		bilink.Screenf("(%d,0) single column, nothing to ripple", r)
 		stop
 	}
 
 	for wave := 0; wave < waves; wave++ {
-		if c == 0 {
-			// originate the wave east, then await its reflection back via the same link
-			time.Sleep(hopDelay)
-			bilink.Screenf("wave %d: send east = %d", wave, wave)
-			link[1] <- int32(wave)
-			var v int32
-			link[1] -> v
-			bilink.Screenf("wave %d: reflected back = %d", wave, v)
-		} else if c == cols-1 {
-			// last column: receive, then reflect straight back west
-			var v int32
-			link[3] -> v
-			bilink.Screenf("wave %d: got %d, reflecting", wave, v)
-			time.Sleep(hopDelay)
-			link[3] <- v
-		} else {
-			// middle: forward the wave east, then forward its reflection west
-			var v int32
-			link[3] -> v
-			bilink.Screenf("wave %d: got %d, forward east", wave, v)
-			time.Sleep(hopDelay)
-			link[1] <- v
+		time.Sleep(hopDelay)
+		bilink.Screenf("wave %d: send east = %d", wave, wave)
+		eastOut <- int32(wave)
+		var v int32
+		eastIn -> v
+		bilink.Screenf("wave %d: reflected back = %d", wave, v)
+	}
 
-			var v2 int32
-			link[1] -> v2
-			bilink.Screenf("wave %d: reflection %d, forward west", wave, v2)
-			time.Sleep(hopDelay)
-			link[3] <- v2
-		}
+	bilink.Screenf("(%d,0) done, %d waves complete", r, waves)
+	stop
+}
+
+// reflect runs at the last column of every row: receives each wave
+// from the west, then reflects it straight back.
+proc reflect(westIn <-chan int32, westOut chan<- int32) {
+	r, c := bilink.Row(), bilink.Col()
+	bilink.Screenf("(%d,%d) ready", r, c)
+
+	for wave := 0; wave < waves; wave++ {
+		var v int32
+		westIn -> v
+		bilink.Screenf("wave %d: got %d, reflecting", wave, v)
+		time.Sleep(hopDelay)
+		westOut <- v
 	}
 
 	bilink.Screenf("(%d,%d) done, %d waves complete", r, c, waves)
 	stop
 }
 
-// One Worker == one grid node (see static/index.html's buildTopology
-// and node-worker.js in the emulator repo) -- the emulator spawns and
-// positions all NxM instances itself, so this program's job is only to
-// run the single node it's told it is via bilink.Row/Col, once. It
-// must NOT enumerate the grid itself (no `par`/`par range` here): a
-// replicated par would spawn N*M goroutines *within this one Worker*,
-// all reading the same bilRow/bilCol and racing on the same link
-// buffers -- confirmed by hitting exactly that bug (every node's
-// screen showing 2-4x duplicated output) before landing on this.
+// relay runs everywhere else: forwards each wave east, then forwards
+// its reflection back west.
+proc relay(westIn <-chan int32, eastOut chan<- int32, eastIn <-chan int32, westOut chan<- int32) {
+	r, c := bilink.Row(), bilink.Col()
+	bilink.Screenf("(%d,%d) ready", r, c)
+
+	for wave := 0; wave < waves; wave++ {
+		var v int32
+		westIn -> v
+		bilink.Screenf("wave %d: got %d, forward east", wave, v)
+		time.Sleep(hopDelay)
+		eastOut <- v
+
+		var v2 int32
+		eastIn -> v2
+		bilink.Screenf("wave %d: reflection %d, forward west", wave, v2)
+		time.Sleep(hopDelay)
+		westOut <- v2
+	}
+
+	bilink.Screenf("(%d,%d) done, %d waves complete", r, c, waves)
+	stop
+}
+
 func main() {
-	node()
+	cols := bilink.NumCols()
+
+	placed par {
+		processor(*, 0) {
+			place eastOut at link[1].out
+			place eastIn at link[1].in
+			origin(eastOut, eastIn)
+		}
+		processor(*, cols-1) {
+			place westIn at link[3].in
+			place westOut at link[3].out
+			reflect(westIn, westOut)
+		}
+		processor(*, *) {
+			place westIn at link[3].in
+			place eastOut at link[1].out
+			place eastIn at link[1].in
+			place westOut at link[3].out
+			relay(westIn, eastOut, eastIn, westOut)
+		}
+	}
 }
