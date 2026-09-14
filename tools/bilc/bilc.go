@@ -254,6 +254,14 @@ type transformer struct {
 	// unchanged from before this type existed.
 	chanShapes map[string][]chanLeaf
 
+	// chanUnions memoizes resolveChanUnion by element-type source text --
+	// same rationale as chanShapes, but for a tagged-union (interface)
+	// placed-channel payload type instead of a struct/array one. Never
+	// populated for a type that isn't even an interface declaration --
+	// resolveChanUnion reports that as ok == false, a fallthrough signal
+	// to try resolveChanShape instead, not something worth caching here.
+	chanUnions map[string]*chanUnionResult
+
 	// usedLinkBool/usedLinkFloat track whether any placed-channel payload
 	// leaf needs the bool<->int32 or float<->int32 helper/import
 	// injected at the end of Transform() -- see chanLeaf's own doc
@@ -731,6 +739,218 @@ func (t *transformer) emitLinkRecv(idxSrc, varSrc string, leaves []chanLeaf) str
 	}
 	b.WriteString("}")
 	return b.String()
+}
+
+// unionVariant is one concrete type implementing a placed channel's
+// tagged-union interface, in declaration order (the order
+// findInterfaceImplementations scans the file) -- that order is also the
+// variant's wire tag, so it must stay stable between a program's own
+// separately-compiled roles (see RoleBinaries): every role transpiles from
+// the same source file, and findInterfaceImplementations's scan is a pure
+// function of that file's own token stream, so this falls out for free.
+// Its own field shape is resolved exactly like a plain struct payload
+// (resolveChanShape), so a variant can itself be an arbitrarily nested
+// struct/array of primitives.
+type unionVariant struct {
+	name   string
+	leaves []chanLeaf
+}
+
+// unionShape is a placed channel's fully resolved tagged-union payload:
+// the protocol interface's own name (used only in generated panic
+// messages), and every implementing variant found in the file, tagged by
+// its position in this slice.
+type unionShape struct {
+	ifaceName string
+	variants  []unionVariant
+}
+
+// chanUnionResult caches one resolveChanUnion call's full three-value
+// result (shape/ok/err), since Go has no single-value way to memoize a
+// function returning more than a value and an error.
+type chanUnionResult struct {
+	shape *unionShape
+	ok    bool
+	err   error
+}
+
+// resolveChanUnion resolves a placed channel's element type as a tagged
+// union: typeSrc must name a package-level `type NAME interface { M() }`
+// declaration with exactly one method, taking no parameters and returning
+// nothing -- a pure marker method, the same `isLogMsg()`-shaped idiom
+// Example 5's own (non-placed) tagged-union channels already use.
+//
+// ok is false when typeSrc doesn't resolve to an interface declaration at
+// all -- the signal for the caller to fall through to resolveChanShape's
+// plain struct/array/primitive resolution instead. ok is true alongside a
+// non-nil error for an interface declaration that doesn't qualify (wrong
+// method count/shape, or no implementing variant) -- a real compile error,
+// not a fallthrough signal, exactly like resolveChanShape's own errors.
+func (t *transformer) resolveChanUnion(typeSrc string) (shape *unionShape, ok bool, err error) {
+	if t.chanUnions == nil {
+		t.chanUnions = map[string]*chanUnionResult{}
+	}
+	if cached, hit := t.chanUnions[typeSrc]; hit {
+		return cached.shape, cached.ok, cached.err
+	}
+	shape, ok, err = t.resolveChanUnionUncached(typeSrc)
+	t.chanUnions[typeSrc] = &chanUnionResult{shape, ok, err}
+	return shape, ok, err
+}
+
+func (t *transformer) resolveChanUnionUncached(typeSrc string) (*unionShape, bool, error) {
+	expr, err := parseTypeExpr(typeSrc)
+	if err != nil {
+		return nil, false, nil // let resolveChanShape produce the real parse error
+	}
+	ident, isIdent := expr.(*ast.Ident)
+	if !isIdent {
+		return nil, false, nil
+	}
+	declSrc, found := t.findTypeDecl(ident.Name)
+	if !found {
+		return nil, false, nil
+	}
+	declExpr, err := parseTypeExpr(declSrc)
+	if err != nil {
+		return nil, false, nil
+	}
+	iface, isIface := declExpr.(*ast.InterfaceType)
+	if !isIface {
+		return nil, false, nil
+	}
+	if len(iface.Methods.List) != 1 || len(iface.Methods.List[0].Names) != 1 {
+		return nil, true, fmt.Errorf("interface %q must declare exactly one method to be a placed channel's tagged-union payload type, like Example 5's isLogMsg()", ident.Name)
+	}
+	method := iface.Methods.List[0]
+	methodName := method.Names[0].Name
+	ftype, isFunc := method.Type.(*ast.FuncType)
+	if !isFunc || (ftype.Params != nil && len(ftype.Params.List) != 0) || (ftype.Results != nil && len(ftype.Results.List) != 0) {
+		return nil, true, fmt.Errorf("interface %q's method %q must take no parameters and return nothing to be a placed channel's tagged-union marker method", ident.Name, methodName)
+	}
+
+	variantNames := t.findInterfaceImplementations(methodName)
+	if len(variantNames) == 0 {
+		return nil, true, fmt.Errorf("interface %q has no implementing type in this file (a `func (V) %s()` method) -- a placed channel's tagged-union payload type needs at least one variant", ident.Name, methodName)
+	}
+	variants := make([]unionVariant, 0, len(variantNames))
+	for _, vname := range variantNames {
+		leaves, err := t.resolveChanShape(vname)
+		if err != nil {
+			return nil, true, fmt.Errorf("variant %q of tagged union %q: %w", vname, ident.Name, err)
+		}
+		variants = append(variants, unionVariant{name: vname, leaves: leaves})
+	}
+	return &unionShape{ifaceName: ident.Name, variants: variants}, true, nil
+}
+
+// findInterfaceImplementations scans the file's own top-level tokens for
+// every `func (RECV TYPE) METHOD()` -- no parameters, no results (checked
+// by requiring the next token after the empty parameter list to be `{`,
+// ruling out `func (T) M() int`/`func (T) M() (a, b int)`, which
+// couldn't satisfy a zero-result marker method anyway) -- collecting TYPE
+// in declaration order: the closed, ordered variant set for a
+// tagged-union placed-channel payload type. Matching is purely
+// structural (does TYPE have a method of this exact shape and name), the
+// same way Go's own interface satisfaction works and consistent with
+// this file's general stance of never needing go/types to answer a
+// structural question. A pointer receiver (`func (r *TYPE) METHOD()`) is
+// not recognized: every variant in this scheme is a plain value type,
+// matching how emitLinkSendUnion/emitLinkRecvUnion construct and access
+// variants by value.
+func (t *transformer) findInterfaceImplementations(methodName string) []string {
+	var names []string
+	for i := 0; i+1 < len(t.toks); i++ {
+		if t.toks[i].tok != token.FUNC || t.toks[i+1].tok != token.LPAREN {
+			continue
+		}
+		open := i + 1
+		close := matchParen(t.toks, open)
+		recvLo := open + 1
+		typeIdx := recvLo
+		if close-recvLo >= 2 && t.toks[recvLo].tok == token.IDENT && t.toks[recvLo+1].tok == token.IDENT {
+			typeIdx = recvLo + 1
+		}
+		if typeIdx >= close || t.toks[typeIdx].tok != token.IDENT || typeIdx+1 != close {
+			continue
+		}
+		typeName := t.toks[typeIdx].lit
+		m := close + 1
+		if m+3 >= len(t.toks) {
+			continue
+		}
+		if t.toks[m].tok != token.IDENT || t.toks[m].lit != methodName {
+			continue
+		}
+		if t.toks[m+1].tok != token.LPAREN || t.toks[m+2].tok != token.RPAREN || t.toks[m+3].tok != token.LBRACE {
+			continue
+		}
+		names = append(names, typeName)
+	}
+	return names
+}
+
+// emitLinkSendUnion renders a placed channel send whose payload type is a
+// tagged union into a scoped block: a Go type switch over valSrc's
+// dynamic type, sending the matching variant's small integer tag
+// (its position in u.variants) followed by its own flattened leaves, in
+// shape order -- the exact inverse of emitLinkRecvUnion. The default case
+// is unreachable in a correctly-typed program (every value ever stored in
+// a placed channel of this interface type must be one of u.variants,
+// since Go's own type system already enforces that at the call site), but
+// is emitted anyway rather than assumed away, matching this file's
+// general stance of never leaving a generated switch non-exhaustive.
+func (t *transformer) emitLinkSendUnion(idxSrc, valSrc string, u *unionShape) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "{\nswitch bilSendVal := (%s).(type) {\n", valSrc)
+	for tag, v := range u.variants {
+		fmt.Fprintf(&b, "case %s:\n", v.name)
+		fmt.Fprintf(&b, "bilink.Send(%s, %d)\n", idxSrc, tag)
+		for _, leaf := range v.leaves {
+			fmt.Fprintf(&b, "bilink.Send(%s, %s)\n", idxSrc, t.encodeLeaf("bilSendVal"+leaf.accessPath, leaf.kind))
+		}
+	}
+	fmt.Fprintf(&b, "default:\npanic(\"bilink: unrecognized %s variant\")\n}\n}", u.ifaceName)
+	return b.String()
+}
+
+// emitLinkRecvUnion renders a placed channel receive whose payload type
+// is a tagged union into a scoped block: read the wire tag, then per
+// case, decode that variant's own leaves into a fresh local of its
+// concrete type (reusing emitLinkRecv's own piecewise-assignment style,
+// just against a synthetic value instead of an already-declared one) and
+// assign the finished value to varSrc -- since varSrc's own static type is
+// the interface, assigning a whole concrete value is the only option: an
+// interface has no fields of its own to assign into piecewise, unlike a
+// struct/array payload's target in emitLinkRecv.
+func (t *transformer) emitLinkRecvUnion(idxSrc, varSrc string, u *unionShape) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "{\nswitch bilink.Recv(%s) {\n", idxSrc)
+	for tag, v := range u.variants {
+		fmt.Fprintf(&b, "case %d:\n", tag)
+		fmt.Fprintf(&b, "var bilRecvVal %s\n", v.name)
+		for _, leaf := range v.leaves {
+			fmt.Fprintf(&b, "bilRecvVal%s = %s\n", leaf.accessPath, t.decodeLeaf(idxSrc, leaf.kind))
+		}
+		fmt.Fprintf(&b, "%s = bilRecvVal\n", varSrc)
+	}
+	fmt.Fprintf(&b, "default:\npanic(\"bilink: unrecognized %s tag\")\n}\n}", u.ifaceName)
+	return b.String()
+}
+
+// resolveChanElem resolves a placed channel's non-int32 element type into
+// its codegen shape: a tagged union (resolveChanUnion) when typeSrc names
+// an interface declaration, otherwise a flat leaf sequence
+// (resolveChanShape) for a struct/array/primitive. Exactly one of the two
+// return values is non-nil on success -- the single entry point
+// collectPlacedCallSites (validation) and transform() (codegen) both use,
+// so neither has to know the union/struct distinction exists on its own.
+func (t *transformer) resolveChanElem(typeSrc string) (leaves []chanLeaf, union *unionShape, err error) {
+	if union, ok, err := t.resolveChanUnion(typeSrc); ok {
+		return nil, union, err
+	}
+	leaves, err = t.resolveChanShape(typeSrc)
+	return leaves, nil, err
 }
 
 // boolWordHelper backs leafBool's int32 encoding -- injected only when
@@ -2092,7 +2312,7 @@ func (t *transformer) collectPlacedCallSites() error {
 			// transform()'s later codegen pass can trust it's already
 			// known-good and never needs to fail itself.
 			if d != dirNone && elemTypes[idx] != "int32" {
-				if _, err := t.resolveChanShape(elemTypes[idx]); err != nil {
+				if _, _, err := t.resolveChanElem(elemTypes[idx]); err != nil {
 					return fmt.Errorf("%s: proc %q's channel parameter %q: %v", t.file.Position(callPos), callee, names[idx], err)
 				}
 			}
@@ -3288,11 +3508,15 @@ func (t *transformer) transform(lo, hi int) []byte {
 				} else {
 					// Already resolved and validated by
 					// collectPlacedCallSites -- this can't fail here.
-					leaves, err := t.resolveChanShape(elemType)
+					leaves, union, err := t.resolveChanElem(elemType)
 					if err != nil {
 						panic(fmt.Sprintf("internal error: %q's shape was validated but won't re-resolve: %v", elemType, err))
 					}
-					out.WriteString(t.emitLinkRecv(idxSrc, varSrc, leaves))
+					if union != nil {
+						out.WriteString(t.emitLinkRecvUnion(idxSrc, varSrc, union))
+					} else {
+						out.WriteString(t.emitLinkRecv(idxSrc, varSrc, leaves))
+					}
 				}
 				cursor = t.off(t.toks[end].pos)
 				i = end
@@ -3302,11 +3526,15 @@ func (t *transformer) transform(lo, hi int) []byte {
 				if elemType == "" || elemType == "int32" {
 					out.WriteString("bilink.Send(" + idxSrc + ", " + valSrc + ")")
 				} else {
-					leaves, err := t.resolveChanShape(elemType)
+					leaves, union, err := t.resolveChanElem(elemType)
 					if err != nil {
 						panic(fmt.Sprintf("internal error: %q's shape was validated but won't re-resolve: %v", elemType, err))
 					}
-					out.WriteString(t.emitLinkSend(idxSrc, valSrc, leaves))
+					if union != nil {
+						out.WriteString(t.emitLinkSendUnion(idxSrc, valSrc, union))
+					} else {
+						out.WriteString(t.emitLinkSend(idxSrc, valSrc, leaves))
+					}
 				}
 				cursor = t.off(t.toks[end].pos)
 				i = end

@@ -787,6 +787,215 @@ func main() {
 	}
 }
 
+// TestPlacedChanTaggedUnionPayload exercises Milestone 2: a placed
+// channel whose element type is a tagged union (a marker-method interface,
+// Example 5's own isLogMsg()-shaped idiom) rather than a plain
+// struct/array. Every implementing variant in the file becomes one `case`
+// in a generated switch, tagged by its declaration order; sending type-
+// switches on the dynamic value, receiving switches on the wire tag and
+// builds each variant via the same piecewise leaf assignment a plain
+// struct payload already uses, then assigns the finished concrete value to
+// the interface-typed target.
+func TestPlacedChanTaggedUnionPayload(t *testing.T) {
+	src := []byte(`package main
+
+type LogMsg interface {
+	isLogMsg()
+}
+
+type Info struct {
+	Code int
+}
+
+func (Info) isLogMsg() {}
+
+type Warn struct {
+	Code int
+}
+
+func (Warn) isLogMsg() {}
+
+proc node(in <-chan LogMsg, out chan<- LogMsg) {
+	var v LogMsg
+	in -> v
+	out <- v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1].in
+			place out2 at link[1].out
+			node(in2, out2)
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"switch bilink.Recv(1) {",
+		"case 0:",
+		"var bilRecvVal Info",
+		"bilRecvVal.Code = int(bilink.Recv(1))",
+		"v = bilRecvVal",
+		"case 1:",
+		"var bilRecvVal Warn",
+		`panic("bilink: unrecognized LogMsg tag")`,
+		"switch bilSendVal := (v).(type) {",
+		"case Info:",
+		"bilink.Send(1, 0)",
+		"bilink.Send(1, int32(bilSendVal.Code))",
+		"case Warn:",
+		"bilink.Send(1, 1)",
+		`panic("bilink: unrecognized LogMsg variant")`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, got)
+		}
+	}
+}
+
+// TestPlacedChanTaggedUnionWrongMethodCount, ...MethodHasParams, and
+// ...NoVariants confirm the interface shapes this feature deliberately
+// doesn't support are rejected with a clear error, the same "reject,
+// don't try to prove it's fine" stance the struct/array shapes already
+// get (TestPlacedChanUnsupportedFieldType et al above).
+func TestPlacedChanTaggedUnionWrongMethodCount(t *testing.T) {
+	src := []byte(`package main
+
+type Proto interface {
+	A()
+	B()
+}
+
+proc node(in <-chan Proto) {
+	var v Proto
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error for a two-method interface, got none")
+	}
+	if !strings.Contains(err.Error(), "must declare exactly one method") {
+		t.Errorf("error = %q, want it to explain only one method is allowed", err.Error())
+	}
+}
+
+func TestPlacedChanTaggedUnionMethodHasParams(t *testing.T) {
+	src := []byte(`package main
+
+type Proto interface {
+	isProto(x int)
+}
+
+proc node(in <-chan Proto) {
+	var v Proto
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error for a marker method with parameters, got none")
+	}
+	if !strings.Contains(err.Error(), "must take no parameters") {
+		t.Errorf("error = %q, want it to explain the marker method must take no parameters", err.Error())
+	}
+}
+
+func TestPlacedChanTaggedUnionNoVariants(t *testing.T) {
+	src := []byte(`package main
+
+type Proto interface {
+	isProto()
+}
+
+proc node(in <-chan Proto) {
+	var v Proto
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error for an interface with no implementing type, got none")
+	}
+	if !strings.Contains(err.Error(), "no implementing type") {
+		t.Errorf("error = %q, want it to explain no variant implements the interface", err.Error())
+	}
+}
+
+// TestPlacedChanTaggedUnionPointerReceiverIgnored confirms a
+// pointer-receiver method doesn't count as a variant implementation --
+// every variant in this scheme is constructed and assigned by value
+// (see emitLinkRecvUnion), so a pointer receiver would silently do the
+// wrong thing rather than being a real implementation choice.
+func TestPlacedChanTaggedUnionPointerReceiverIgnored(t *testing.T) {
+	src := []byte(`package main
+
+type Proto interface {
+	isProto()
+}
+
+type Info struct {
+	Code int
+}
+
+func (*Info) isProto() {}
+
+proc node(in <-chan Proto) {
+	var v Proto
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error since the only implementation uses a pointer receiver, got none")
+	}
+	if !strings.Contains(err.Error(), "no implementing type") {
+		t.Errorf("error = %q, want it to explain no (value-receiver) variant implements the interface", err.Error())
+	}
+}
+
 // TestRoleBinaries checks that RoleBinaries emits one standalone,
 // syntactically valid Go file per distinct placed-par role, each with
 // its own main() calling only that role's proc -- and that every
