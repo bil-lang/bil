@@ -238,7 +238,7 @@ func main() {
 // bilink calls, with the bilink import auto-injected the same way
 // `stop` pulls in "time" and `altN` pulls in "reflect". It can't use
 // the TestOK ok/*.bil shape: the generated code imports
-// emulator/nodeprog/bilink, a different Go module this one doesn't
+// emulator/bilink, a different Go module this one doesn't
 // depend on (see ../../../emulator, a sibling repo) and which is
 // //go:build js && wasm-gated besides — building it here, on the host
 // arch, can't work at all. Checking the transformed text is the right
@@ -267,7 +267,7 @@ func main() {
 	if !strings.Contains(got, "bilink.Send(east, v)") {
 		t.Errorf("expected `link[east] <- v` to rewrite to `bilink.Send(east, v)`, got:\n%s", got)
 	}
-	if !strings.Contains(got, `import "emulator/nodeprog/bilink"`) {
+	if !strings.Contains(got, `import "emulator/bilink"`) {
 		t.Errorf("expected the bilink import to be auto-injected, got:\n%s", got)
 	}
 
@@ -276,7 +276,7 @@ func main() {
 	// etc. already follow via hasImport.
 	srcWithImport := []byte(`package main
 
-import "emulator/nodeprog/bilink"
+import "emulator/bilink"
 
 proc node() {
 	var v int32
@@ -291,7 +291,7 @@ func main() {
 	if err != nil {
 		t.Fatalf("Transform (pre-imported): %v", err)
 	}
-	if n := strings.Count(string(out2), `"emulator/nodeprog/bilink"`); n != 1 {
+	if n := strings.Count(string(out2), `"emulator/bilink"`); n != 1 {
 		t.Errorf("expected exactly one bilink import, got %d in:\n%s", n, out2)
 	}
 }
@@ -346,10 +346,14 @@ func main() {
 			t.Errorf("expected %q in output, got:\n%s", want, got)
 		}
 	}
-	if !strings.Contains(got, "//go:build js && wasm") {
-		t.Errorf("expected the js/wasm build tag to be auto-injected, got:\n%s", got)
+	if strings.Contains(got, "//go:build") {
+		// bilink itself owns the platform split (js/wasm vs. native --
+		// see emulator/bilink/bilink.go and bilink_native.go),
+		// so generated code that merely calls into it must stay
+		// build-tag-free to be buildable under either.
+		t.Errorf("expected no build tag on generated code (bilink owns that split), got:\n%s", got)
 	}
-	if n := strings.Count(got, `"emulator/nodeprog/bilink"`); n != 1 {
+	if n := strings.Count(got, `"emulator/bilink"`); n != 1 {
 		t.Errorf("expected exactly one bilink import, got %d in:\n%s", n, got)
 	}
 }
@@ -457,7 +461,7 @@ func main() {
 	if !strings.Contains(got, "node(nil, nil)") {
 		t.Errorf("expected the placed call's channel arguments to become nil, got:\n%s", got)
 	}
-	if !strings.Contains(got, `import "emulator/nodeprog/bilink"`) {
+	if !strings.Contains(got, `import "emulator/bilink"`) {
 		t.Errorf("expected the bilink import to be auto-injected, got:\n%s", got)
 	}
 }
@@ -499,6 +503,287 @@ func main() {
 	}
 	if strings.Contains(got, ".in") || strings.Contains(got, ".out") {
 		t.Errorf("expected the .in/.out suffix to be discarded entirely, got:\n%s", got)
+	}
+}
+
+// TestPlacedChanStructPayload checks that a placed channel typed as a
+// plain struct (mirroring examples/05-protocol.bil's Point) gets
+// expanded into one bilink.Send/Recv per field, in declaration order,
+// wrapped in a scoped block -- not the single-word bilink.Send/Recv a
+// plain int32 payload still gets untouched.
+func TestPlacedChanStructPayload(t *testing.T) {
+	src := []byte(`package main
+
+type Point struct {
+	X, Y int
+}
+
+proc node(in <-chan Point, out chan<- Point) {
+	var p Point
+	in -> p
+	out <- p
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1].in
+			place out2 at link[1].out
+			node(in2, out2)
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"p.X = int(bilink.Recv(1))",
+		"p.Y = int(bilink.Recv(1))",
+		"bilSendVal := (p)",
+		"bilink.Send(1, int32(bilSendVal.X))",
+		"bilink.Send(1, int32(bilSendVal.Y))",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, got)
+		}
+	}
+	// A plain int32 payload elsewhere in the same file must still get
+	// the original, single-word codegen -- this feature must not
+	// change behavior for the common case.
+	if strings.Contains(got, "int32(bilink.Recv") {
+		t.Errorf("an int32 leaf must decode via a bare bilink.Recv call, not a redundant int32(...) wrap, got:\n%s", got)
+	}
+}
+
+// TestPlacedChanNestedStructAndArrayPayload exercises a struct field that's
+// itself another named struct, and a fixed-size array of that struct --
+// both should flatten into one leaf per primitive component, addressed by
+// a plain dotted/indexed Go selector built directly off the whole value,
+// with no nested composite literal required.
+func TestPlacedChanNestedStructAndArrayPayload(t *testing.T) {
+	src := []byte(`package main
+
+type Inner struct {
+	A, B int
+}
+
+type Outer struct {
+	Inner Inner
+	C     int
+}
+
+proc node(in <-chan [2]Outer) {
+	var v [2]Outer
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"v[0].Inner.A = int(bilink.Recv(1))",
+		"v[0].Inner.B = int(bilink.Recv(1))",
+		"v[0].C = int(bilink.Recv(1))",
+		"v[1].Inner.A = int(bilink.Recv(1))",
+		"v[1].Inner.B = int(bilink.Recv(1))",
+		"v[1].C = int(bilink.Recv(1))",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, got)
+		}
+	}
+}
+
+// TestPlacedChanBoolFloatPayload checks bool (0/1-encoded via the
+// injected bilBoolWord/bilWordBool helpers) and float64 (bit-packed via
+// math.Float32bits/Float32frombits, the same convention
+// 22-pipeline-transformer.bil already established by hand), and that
+// their helper/import get injected only because this file actually uses
+// them.
+func TestPlacedChanBoolFloatPayload(t *testing.T) {
+	src := []byte(`package main
+
+type Reading struct {
+	Ok    bool
+	Value float64
+}
+
+proc node(in <-chan Reading, out chan<- Reading) {
+	var r Reading
+	in -> r
+	out <- r
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1].in
+			place out2 at link[1].out
+			node(in2, out2)
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"r.Ok = bilWordBool(bilink.Recv(1))",
+		"r.Value = float64(math.Float32frombits(uint32(bilink.Recv(1))))",
+		"bilink.Send(1, bilBoolWord(bilSendVal.Ok))",
+		"bilink.Send(1, int32(math.Float32bits(float32(bilSendVal.Value))))",
+		"func bilBoolWord(b bool) int32",
+		"func bilWordBool(w int32) bool",
+		`import "math"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, got)
+		}
+	}
+}
+
+// TestPlacedChanBarePrimitivePayload checks a placed channel whose element
+// type is a bare primitive (no wrapping struct at all) -- the empty
+// access-path case, exercising float64 directly.
+func TestPlacedChanBarePrimitivePayload(t *testing.T) {
+	src := []byte(`package main
+
+proc node(in <-chan float64, out chan<- float64) {
+	var v float64
+	in -> v
+	out <- v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1].in
+			place out2 at link[1].out
+			node(in2, out2)
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"v = float64(math.Float32frombits(uint32(bilink.Recv(1))))",
+		"bilink.Send(1, int32(math.Float32bits(float32(bilSendVal))))",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, got)
+		}
+	}
+}
+
+// TestPlacedChanUnsupportedFieldType, TestPlacedChanSlicePayload, and
+// TestPlacedChanSelfReferentialPayload confirm the shapes this feature
+// deliberately doesn't support are rejected with a clear error at
+// Transform() time (during collectPlacedCallSites's validation pass),
+// never silently miscompiled or deferred to a confusing Go compiler
+// error the way an unresolvable placed channel type used to be.
+func TestPlacedChanUnsupportedFieldType(t *testing.T) {
+	src := []byte(`package main
+
+type Msg struct {
+	Text string
+}
+
+proc node(in <-chan Msg) {
+	var v Msg
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error for a string field, got none")
+	}
+	if !strings.Contains(err.Error(), "not one of the supported") {
+		t.Errorf("error = %q, want it to explain the field's type isn't supported", err.Error())
+	}
+}
+
+func TestPlacedChanSlicePayload(t *testing.T) {
+	src := []byte(`package main
+
+proc node(in <-chan []int32) {
+	var v []int32
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error for a slice payload type, got none")
+	}
+	if !strings.Contains(err.Error(), "slice") {
+		t.Errorf("error = %q, want it to call out that it's a slice", err.Error())
+	}
+}
+
+func TestPlacedChanSelfReferentialPayload(t *testing.T) {
+	src := []byte(`package main
+
+type Node struct {
+	Next Node
+}
+
+proc node(in <-chan Node) {
+	var v Node
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error for a self-referential struct, got none")
+	}
+	if !strings.Contains(err.Error(), "self-referential") {
+		t.Errorf("error = %q, want it to call out the self-reference", err.Error())
 	}
 }
 

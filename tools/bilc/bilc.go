@@ -7,10 +7,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"go/ast"
 	"go/format"
+	"go/parser"
 	"go/scanner"
 	"go/token"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -242,6 +245,22 @@ type transformer struct {
 	// parameter list and body range by name.
 	funcBodyByName map[string]funcBodyRange
 
+	// chanShapes memoizes resolveChanShape by element-type source text --
+	// populated during collectPlacedCallSites (the validation pass, which
+	// can return an error), consumed during transform() (which cannot),
+	// so a placed channel's payload shape is always already known and
+	// valid by the time codegen needs it. Never populated for "int32"
+	// itself -- that's the original, single-word, zero-overhead path,
+	// unchanged from before this type existed.
+	chanShapes map[string][]chanLeaf
+
+	// usedLinkBool/usedLinkFloat track whether any placed-channel payload
+	// leaf needs the bool<->int32 or float<->int32 helper/import
+	// injected at the end of Transform() -- see chanLeaf's own doc
+	// comment and emitLinkHelpers.
+	usedLinkBool  bool
+	usedLinkFloat bool
+
 	// roleOverride, when non-empty, changes what a `placed par` block
 	// compiles to: instead of the full multi-role switch, just a single
 	// hardcoded call to whichever placed-callable proc is named here (see
@@ -257,13 +276,478 @@ type transformer struct {
 }
 
 // placeAliasScope is one proc/func body's `place`-alias table: NAME ->
-// the link index expression's source text (e.g. "east", "3"), resolved
-// by matchLinkReceive/matchLinkSend and the link-rejection guards via
-// resolvePlaceAlias.
+// its placeBinding, resolved by matchLinkReceive/matchLinkSend and the
+// link-rejection guards via resolvePlaceAlias.
 type placeAliasScope struct {
 	bodyLo, bodyHi int
-	aliases        map[string]string
+	aliases        map[string]placeBinding
 }
+
+// placeBinding is what a `place` name resolves to inside its callee's
+// body: the link index expression's source text (e.g. "east", "3"), and
+// the callee's own declared element type for that channel parameter
+// (e.g. "int32", "Point", "[4]float64") -- elemType drives whether
+// matchLinkReceive/matchLinkSend emit the original single-word
+// bilink.Recv/Send call (elemType == "int32", the zero-overhead path
+// every placed channel used before payload types existed) or the
+// multi-word encode/decode sequence for a resolved chanShape.
+type placeBinding struct {
+	idxExpr  string
+	elemType string
+}
+
+// leafKind is one chanLeaf's primitive kind, determining which int32
+// conversion each direction needs (see encodeLeaf/decodeLeaf).
+type leafKind int
+
+const (
+	leafInt32 leafKind = iota
+	leafInt
+	leafBool
+	leafFloat32
+	leafFloat64
+)
+
+// chanLeaf is one flattened primitive component of a placed channel's
+// resolved payload shape, in encoding order. accessPath reaches it from
+// the whole value as a plain Go selector/index suffix -- ".X", ".Nested.Y",
+// "[2].Z", or "" for a payload type that's itself a bare primitive with
+// nothing to select -- string-concatenated directly onto whatever Go
+// expression denotes the whole value, so struct nesting and fixed arrays
+// both fall out for free without ever needing to build a nested
+// composite literal.
+type chanLeaf struct {
+	accessPath string
+	kind       leafKind
+}
+
+// resolveChanShape resolves a placed channel's element-type source text
+// (e.g. "Point", "[4]float64" -- never "int32" itself, which never
+// reaches here: see collectPlacedCallSites/matchLinkReceive/
+// matchLinkSend, all of which special-case exactly that string to keep
+// the original single-word path unchanged) into an ordered list of
+// leaves to encode/decode one int32 word at a time over the physical
+// link. This is a compile-time, structural resolution -- scanning the
+// same file's own `type X ...` declarations, via go/parser only to
+// interpret one type's own syntax, never go/types -- not a runtime,
+// reflection-based one; see this feature's design notes (carrying real
+// payload types over a link) for why. Memoized in t.chanShapes, since
+// multiple placed channels commonly share one payload type.
+func (t *transformer) resolveChanShape(typeSrc string) ([]chanLeaf, error) {
+	if leaves, ok := t.chanShapes[typeSrc]; ok {
+		return leaves, nil
+	}
+	leaves, err := t.resolveTypeShape(typeSrc, "", map[string]bool{})
+	if err != nil {
+		return nil, err
+	}
+	if t.chanShapes == nil {
+		t.chanShapes = map[string][]chanLeaf{}
+	}
+	t.chanShapes[typeSrc] = leaves
+	return leaves, nil
+}
+
+// resolveTypeShape does resolveChanShape's actual recursive work,
+// parameterized by the access-path prefix accumulated so far (resolving
+// a struct field recurses with path+"."+fieldName; a fixed array element
+// recurses with path+"[i]") and a seen-set of named types already being
+// resolved on this same path, to reject a self-referential shape outright
+// rather than recursing forever -- the same "reject, don't try to prove
+// it's fine" stance every other check in this file already takes.
+func (t *transformer) resolveTypeShape(typeSrc, path string, seen map[string]bool) ([]chanLeaf, error) {
+	expr, err := parseTypeExpr(typeSrc)
+	if err != nil {
+		return nil, fmt.Errorf("%q is not a valid type: %w", typeSrc, err)
+	}
+	switch e := expr.(type) {
+	case *ast.Ident:
+		switch e.Name {
+		case "int32":
+			return []chanLeaf{{path, leafInt32}}, nil
+		case "int":
+			return []chanLeaf{{path, leafInt}}, nil
+		case "bool":
+			return []chanLeaf{{path, leafBool}}, nil
+		case "float32":
+			return []chanLeaf{{path, leafFloat32}}, nil
+		case "float64":
+			return []chanLeaf{{path, leafFloat64}}, nil
+		}
+		if seen[e.Name] {
+			return nil, fmt.Errorf("type %q is self-referential -- a placed channel's payload type may not recurse", e.Name)
+		}
+		declSrc, ok := t.findTypeDecl(e.Name)
+		if !ok {
+			return nil, fmt.Errorf("type %q is not one of the supported primitive types (int, int32, bool, float32, float64) and has no `type %s ...` declaration in this file -- only these, plus structs and fixed-size arrays of these, may cross a placed channel", e.Name, e.Name)
+		}
+		nested := map[string]bool{e.Name: true}
+		for k, v := range seen {
+			nested[k] = v
+		}
+		return t.resolveTypeShape(declSrc, path, nested)
+	case *ast.ArrayType:
+		if e.Len == nil {
+			return nil, fmt.Errorf("type %q is a slice, not a fixed-size array -- only a fixed [N]T array may cross a placed channel (a slice has no compile-time-known length)", typeSrc)
+		}
+		n, err := t.evalConstIntExpr(e.Len, map[string]bool{})
+		if err != nil {
+			return nil, fmt.Errorf("type %q's array length is not a compile-time integer constant: %w", typeSrc, err)
+		}
+		elemSrc := srcOfTypeExpr(e.Elt)
+		var leaves []chanLeaf
+		for i := 0; i < n; i++ {
+			elemLeaves, err := t.resolveTypeShape(elemSrc, fmt.Sprintf("%s[%d]", path, i), seen)
+			if err != nil {
+				return nil, err
+			}
+			leaves = append(leaves, elemLeaves...)
+		}
+		return leaves, nil
+	case *ast.StructType:
+		var leaves []chanLeaf
+		for _, field := range e.Fields.List {
+			if len(field.Names) == 0 {
+				return nil, fmt.Errorf("embedded field of type %q not supported for a placed channel's payload type -- every field must be named", srcOfTypeExpr(field.Type))
+			}
+			fieldTypeSrc := srcOfTypeExpr(field.Type)
+			for _, name := range field.Names {
+				fieldLeaves, err := t.resolveTypeShape(fieldTypeSrc, path+"."+name.Name, seen)
+				if err != nil {
+					return nil, err
+				}
+				leaves = append(leaves, fieldLeaves...)
+			}
+		}
+		return leaves, nil
+	default:
+		return nil, fmt.Errorf("type %q has an unsupported shape for a placed channel's payload type -- only int/int32/bool/float32/float64, nested structs of those, and fixed-size arrays of those are supported (no string, slice, map, pointer, chan, func, or interface)", typeSrc)
+	}
+}
+
+// findConstDeclSrc scans the file's own top-level tokens for a `const NAME
+// = ...` declaration -- either a standalone `const NAME = EXPR` or one spec
+// inside a grouped `const ( ... )` block -- and returns the whole
+// declaration's (or whole group's) source text: the same "extract by token
+// span, then let go/parser make sense of it" approach findTypeDecl already
+// uses for `type` declarations. Used by constIntValue to resolve a named
+// constant referenced as a placed channel's fixed-array length.
+func (t *transformer) findConstDeclSrc(name string) (declSrc string, ok bool) {
+	bodies := t.collectFuncBodyRanges()
+	inBody := func(i int) bool {
+		for _, br := range bodies {
+			if i >= br.bodyLo && i < br.bodyHi {
+				return true
+			}
+		}
+		return false
+	}
+	for i := 0; i < len(t.toks); i++ {
+		if t.toks[i].tok != token.CONST || inBody(i) {
+			continue
+		}
+		j := i + 1
+		if j < len(t.toks) && t.toks[j].tok == token.LPAREN {
+			close := matchParen(t.toks, j)
+			hasName := false
+			for k := j + 1; k < close; k++ {
+				if t.toks[k].tok == token.IDENT && t.toks[k].lit == name &&
+					(t.toks[k-1].tok == token.LPAREN || t.toks[k-1].tok == token.SEMICOLON) {
+					hasName = true
+					break
+				}
+			}
+			if !hasName {
+				continue
+			}
+			hi := close + 1
+			return strings.TrimSpace(string(t.src[t.off(t.toks[i].pos):t.off(t.toks[hi].pos)])), true
+		}
+		if j < len(t.toks) && t.toks[j].tok == token.IDENT && t.toks[j].lit == name {
+			k := j
+			for k < len(t.toks) && t.toks[k].tok != token.SEMICOLON {
+				k++
+			}
+			return strings.TrimSpace(string(t.src[t.off(t.toks[i].pos):t.off(t.toks[k].pos)])), true
+		}
+	}
+	return "", false
+}
+
+// constIntValue resolves a package-level integer constant NAME's own
+// value, recursively (via evalConstIntExpr) if its declared expression
+// itself references other constants -- so a fixed-array placed-channel
+// payload type can size itself off a named constant (`[dModel]float64`)
+// exactly like ordinary non-placed Bil code already does, instead of
+// requiring every array length to be written out as a bare integer
+// literal. seen guards against a self-referential chain of const
+// declarations, matching resolveTypeShape's own cycle guard for named
+// types.
+func (t *transformer) constIntValue(name string, seen map[string]bool) (int, error) {
+	if seen[name] {
+		return 0, fmt.Errorf("constant %q is self-referential", name)
+	}
+	declSrc, ok := t.findConstDeclSrc(name)
+	if !ok {
+		return 0, fmt.Errorf("no package-level `const %s = ...` declaration found", name)
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "", "package p\n"+declSrc, 0)
+	if err != nil {
+		return 0, fmt.Errorf("parsing const declaration for %q: %w", name, err)
+	}
+	nested := map[string]bool{name: true}
+	for k, v := range seen {
+		nested[k] = v
+	}
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for idx, n := range vs.Names {
+				if n.Name != name {
+					continue
+				}
+				if idx >= len(vs.Values) {
+					return 0, fmt.Errorf("constant %q has no explicit value in this declaration (iota-continuation constants are not supported here)", name)
+				}
+				return t.evalConstIntExpr(vs.Values[idx], nested)
+			}
+		}
+	}
+	return 0, fmt.Errorf("no package-level `const %s = ...` declaration found", name)
+}
+
+// evalConstIntExpr evaluates a constant integer expression -- an int
+// literal, +/-/*// arithmetic, a parenthesized subexpression, or a
+// reference to another package-level constant -- entirely structurally
+// (go/ast shape matching, never go/types), matching this file's existing
+// stance of resolving just enough of Go's grammar for what a real Bil
+// program's placed-channel array-length expression actually needs, and
+// rejecting everything else outright.
+func (t *transformer) evalConstIntExpr(expr ast.Expr, seen map[string]bool) (int, error) {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		if e.Kind != token.INT {
+			return 0, fmt.Errorf("non-integer constant %q", e.Value)
+		}
+		return strconv.Atoi(e.Value)
+	case *ast.Ident:
+		return t.constIntValue(e.Name, seen)
+	case *ast.ParenExpr:
+		return t.evalConstIntExpr(e.X, seen)
+	case *ast.UnaryExpr:
+		x, err := t.evalConstIntExpr(e.X, seen)
+		if err != nil {
+			return 0, err
+		}
+		switch e.Op {
+		case token.SUB:
+			return -x, nil
+		case token.ADD:
+			return x, nil
+		}
+		return 0, fmt.Errorf("unsupported unary operator %v in constant array-length expression", e.Op)
+	case *ast.BinaryExpr:
+		x, err := t.evalConstIntExpr(e.X, seen)
+		if err != nil {
+			return 0, err
+		}
+		y, err := t.evalConstIntExpr(e.Y, seen)
+		if err != nil {
+			return 0, err
+		}
+		switch e.Op {
+		case token.ADD:
+			return x + y, nil
+		case token.SUB:
+			return x - y, nil
+		case token.MUL:
+			return x * y, nil
+		case token.QUO:
+			if y == 0 {
+				return 0, fmt.Errorf("division by zero in constant array-length expression")
+			}
+			return x / y, nil
+		}
+		return 0, fmt.Errorf("unsupported operator %v in constant array-length expression", e.Op)
+	default:
+		return 0, fmt.Errorf("unsupported expression shape %T in constant array-length expression", expr)
+	}
+}
+
+// parseTypeExpr parses typeSrc (e.g. "Point", "[4]float64", "bool") as a
+// Go type by embedding it in a synthetic `type T <typeSrc>` declaration
+// and parsing that -- go/parser.ParseExpr can't parse a bare type like
+// `[4]float64` on its own (an array/slice type isn't a valid standalone
+// expression), but every type is valid as a TypeSpec's own Type.
+func parseTypeExpr(typeSrc string) (ast.Expr, error) {
+	f, err := parser.ParseFile(token.NewFileSet(), "", "package p\ntype T "+typeSrc, 0)
+	if err != nil {
+		return nil, err
+	}
+	return f.Decls[0].(*ast.GenDecl).Specs[0].(*ast.TypeSpec).Type, nil
+}
+
+// srcOfTypeExpr renders expr back to Go source text -- needed because a
+// struct field's type or an array's element type, once parsed out of a
+// synthetic `type T ...` declaration, is an AST node with no byte offset
+// into the original .bil source to slice from (it's an offset into that
+// synthetic declaration instead); go/format's own printer is the
+// correct, general way to turn it back into a string resolveTypeShape
+// can recurse on or an error message can quote.
+func srcOfTypeExpr(expr ast.Expr) string {
+	var buf bytes.Buffer
+	if err := format.Node(&buf, token.NewFileSet(), expr); err != nil {
+		return fmt.Sprintf("%T", expr)
+	}
+	return buf.String()
+}
+
+// findTypeDecl scans the file's own tokens for a top-level `type NAME
+// <TYPE>` declaration (never inside a proc/func body -- Bil types, like
+// Go's, are declared at package scope; no example declares one locally)
+// and returns <TYPE>'s own source text, tracking brace/bracket/paren
+// depth so a struct's own `{ ... }` doesn't end the scan early. ok is
+// false if no such declaration exists.
+func (t *transformer) findTypeDecl(name string) (typeSrc string, ok bool) {
+	bodies := t.collectFuncBodyRanges()
+	inBody := func(i int) bool {
+		for _, br := range bodies {
+			if i >= br.bodyLo && i < br.bodyHi {
+				return true
+			}
+		}
+		return false
+	}
+	for i := 0; i+1 < len(t.toks); i++ {
+		if t.toks[i].tok != token.TYPE || t.toks[i+1].tok != token.IDENT || t.toks[i+1].lit != name || inBody(i) {
+			continue
+		}
+		lo := i + 2
+		depth := 0
+		j := lo
+	scan:
+		for j < len(t.toks) {
+			switch t.toks[j].tok {
+			case token.LBRACE, token.LBRACK, token.LPAREN:
+				depth++
+			case token.RBRACE:
+				depth--
+				if depth == 0 {
+					j++
+					break scan
+				}
+			case token.RBRACK, token.RPAREN:
+				depth--
+			case token.SEMICOLON:
+				if depth == 0 {
+					break scan
+				}
+			}
+			j++
+		}
+		return strings.TrimSpace(string(t.src[t.off(t.toks[lo].pos):t.off(t.toks[j].pos)])), true
+	}
+	return "", false
+}
+
+// encodeLeaf renders the Go expression that converts accessExpr (e.g.
+// "bilSendVal.X") -- a value of leaf's own native kind -- into the int32
+// bilink.Send expects.
+func (t *transformer) encodeLeaf(accessExpr string, kind leafKind) string {
+	switch kind {
+	case leafInt32:
+		return accessExpr
+	case leafInt:
+		return "int32(" + accessExpr + ")"
+	case leafBool:
+		t.usedLinkBool = true
+		return "bilBoolWord(" + accessExpr + ")"
+	case leafFloat32:
+		t.usedLinkFloat = true
+		return "int32(math.Float32bits(" + accessExpr + "))"
+	case leafFloat64:
+		t.usedLinkFloat = true
+		return "int32(math.Float32bits(float32(" + accessExpr + ")))"
+	}
+	panic("unreachable leafKind")
+}
+
+// decodeLeaf renders the Go expression that converts one bilink.Recv(idxSrc)
+// word back into leaf's own native kind -- the exact inverse of encodeLeaf,
+// using the same f32bits/f32val-style bit-packing convention
+// 22-pipeline-transformer.bil already established by hand for a float.
+func (t *transformer) decodeLeaf(idxSrc string, kind leafKind) string {
+	recv := "bilink.Recv(" + idxSrc + ")"
+	switch kind {
+	case leafInt32:
+		return recv
+	case leafInt:
+		return "int(" + recv + ")"
+	case leafBool:
+		t.usedLinkBool = true
+		return "bilWordBool(" + recv + ")"
+	case leafFloat32:
+		t.usedLinkFloat = true
+		return "math.Float32frombits(uint32(" + recv + "))"
+	case leafFloat64:
+		t.usedLinkFloat = true
+		return "float64(math.Float32frombits(uint32(" + recv + ")))"
+	}
+	panic("unreachable leafKind")
+}
+
+// emitLinkSend renders a placed channel send whose payload isn't a bare
+// int32 into a scoped block: capture the value expression once (so a
+// side-effecting valSrc -- e.g. a function call -- isn't evaluated once
+// per leaf), then one bilink.Send per flattened leaf, in shape order.
+func (t *transformer) emitLinkSend(idxSrc, valSrc string, leaves []chanLeaf) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "{\nbilSendVal := (%s)\n", valSrc)
+	for _, leaf := range leaves {
+		fmt.Fprintf(&b, "bilink.Send(%s, %s)\n", idxSrc, t.encodeLeaf("bilSendVal"+leaf.accessPath, leaf.kind))
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
+// emitLinkRecv renders a placed channel receive whose payload isn't a
+// bare int32 into a scoped block: one bilink.Recv per flattened leaf,
+// assigned straight into the already-declared target's own leaf access
+// path. Declare-form (`:->`) isn't supported for a typed payload, same
+// as it already wasn't for a bare link[idx] (see matchLinkReceive) --
+// varSrc always names an existing variable.
+func (t *transformer) emitLinkRecv(idxSrc, varSrc string, leaves []chanLeaf) string {
+	var b strings.Builder
+	b.WriteString("{\n")
+	for _, leaf := range leaves {
+		fmt.Fprintf(&b, "%s%s = %s\n", varSrc, leaf.accessPath, t.decodeLeaf(idxSrc, leaf.kind))
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
+// boolWordHelper backs leafBool's int32 encoding -- injected only when
+// t.usedLinkBool, matching the conditional-injection convention every
+// other optional helper in this file already follows (parHelper etc. are
+// unconditional; altNHelper/splitN2DHelper are not).
+const boolWordHelper = `
+func bilBoolWord(b bool) int32 {
+	if b {
+		return 1
+	}
+	return 0
+}
+func bilWordBool(w int32) bool {
+	return w != 0
+}
+`
 
 func tokenize(filename string, src []byte) *transformer {
 	fset := token.NewFileSet()
@@ -441,18 +925,44 @@ func classifyChanType(toks []tok, lo, hi int) chanDir {
 	return dirNone
 }
 
+// chanElemLo mirrors classifyChanType exactly, additionally reporting
+// where a channel parameter's element-type tokens begin -- i.e. lo
+// advanced past whichever of `<-chan`/`chan<-`/`chan` prefixed it. Used
+// by paramNamesAndDirections to capture a placed channel's element-type
+// source text (needed to resolve its payload shape), which
+// classifyChanType's own direction-only result discards. Returns
+// (lo, false) if [lo,hi) isn't a channel type at all.
+func chanElemLo(toks []tok, lo, hi int) (elemLo int, ok bool) {
+	if lo >= hi {
+		return lo, false
+	}
+	if toks[lo].tok == token.ARROW && lo+1 < hi && toks[lo+1].tok == token.CHAN {
+		return lo + 2, true
+	}
+	if toks[lo].tok == token.CHAN {
+		if lo+1 < hi && toks[lo+1].tok == token.ARROW {
+			return lo + 2, true
+		}
+		return lo + 1, true
+	}
+	return lo, false
+}
+
 // paramNamesAndDirections parses a `proc`'s parameter list, [lo,hi) being
-// the token range between its parens, into each parameter's own name and
-// declared chanDir, in declaration order — dirNone for every non-channel
+// the token range between its parens, into each parameter's own name,
+// declared chanDir, and (for a channel parameter) its element-type source
+// text (e.g. "int32", "Point", "[4]float64" -- "" for a non-channel
+// parameter), all in declaration order — dirNone/"" for every non-channel
 // parameter. Needed by checkProcChanBothDirections to know which identifier
-// in the proc's body to watch for. Handles Go's short form for parameters
+// in the proc's body to watch for, and by collectPlacedCallSites to resolve
+// a placed channel's payload shape. Handles Go's short form for parameters
 // that share a type (`xmin, xmax, ymin, ymax float64`): only the last name
 // in such a run carries the type textually, so names are held back in
 // `pending` until a typed segment is reached, then all of them (plus that
-// segment's own name) get its direction — the same "which names does this
-// type actually cover" problem `splitCallArgs`'s top-level-comma split
-// doesn't resolve by itself.
-func (t *transformer) paramNamesAndDirections(lo, hi int) (names []string, dirs []chanDir) {
+// segment's own name) get its direction and element type — the same
+// "which names does this type actually cover" problem `splitCallArgs`'s
+// top-level-comma split doesn't resolve by itself.
+func (t *transformer) paramNamesAndDirections(lo, hi int) (names []string, dirs []chanDir, elemTypes []string) {
 	var pending []string
 	for _, seg := range splitCallArgs(t.toks, lo, hi) {
 		segLo, segHi := seg[0], seg[1]
@@ -467,15 +977,23 @@ func (t *transformer) paramNamesAndDirections(lo, hi int) (names []string, dirs 
 			continue // shouldn't happen for a named parameter list
 		}
 		d := classifyChanType(t.toks, segLo+1, segHi)
+		elem := ""
+		if d != dirNone {
+			if elemLo, ok := chanElemLo(t.toks, segLo+1, segHi); ok {
+				elem = strings.TrimSpace(string(t.src[t.off(t.toks[elemLo].pos):t.off(t.toks[segHi].pos)]))
+			}
+		}
 		for _, n := range pending {
 			names = append(names, n)
 			dirs = append(dirs, d)
+			elemTypes = append(elemTypes, elem)
 		}
 		names = append(names, t.toks[segLo].lit)
 		dirs = append(dirs, d)
+		elemTypes = append(elemTypes, elem)
 		pending = nil
 	}
-	return names, dirs
+	return names, dirs, elemTypes
 }
 
 // checkProcChanBothDirections enforces Bil's other channel usage rule: a
@@ -512,7 +1030,7 @@ func (t *transformer) checkProcChanBothDirections() error {
 		bodyOpen := parenClose + 1
 		bodyClose := matchBrace(toks, bodyOpen)
 
-		names, dirs := t.paramNamesAndDirections(i+3, parenClose)
+		names, dirs, _ := t.paramNamesAndDirections(i+3, parenClose)
 		for idx, name := range names {
 			if dirs[idx] != dirBoth {
 				continue
@@ -1560,13 +2078,23 @@ func (t *transformer) collectPlacedCallSites() error {
 		if !found {
 			return fmt.Errorf("%s: placed par calls undeclared proc %q", t.file.Position(callPos), callee)
 		}
-		names, dirs := t.paramNamesAndDirections(br.paramsLo, br.paramsHi)
+		names, dirs, elemTypes := t.paramNamesAndDirections(br.paramsLo, br.paramsHi)
 		if len(names) != len(argRanges) {
 			return fmt.Errorf("%s: proc %q takes %d parameter(s) but is placed-called with %d argument(s)", t.file.Position(callPos), callee, len(names), len(argRanges))
 		}
 		for idx, d := range dirs {
 			if d == dirBoth {
 				return fmt.Errorf("%s: proc %q's channel parameter %q is declared as a bare, undirected chan -- a proc called from a placed par clause must declare every channel parameter with an explicit direction (<-chan T for receive-only, chan<- T for send-only), so Go's own compiler -- not checkProcChanBothDirections's best-effort body-scan, which can miss a send/receive reached through an alias -- guarantees it's never used for both", t.file.Position(callPos), callee, names[idx])
+			}
+			// A payload type other than plain int32 must have a
+			// resolvable shape -- validated here (the one pass that
+			// returns an error) and cached in t.chanShapes, so
+			// transform()'s later codegen pass can trust it's already
+			// known-good and never needs to fail itself.
+			if d != dirNone && elemTypes[idx] != "int32" {
+				if _, err := t.resolveChanShape(elemTypes[idx]); err != nil {
+					return fmt.Errorf("%s: proc %q's channel parameter %q: %v", t.file.Position(callPos), callee, names[idx], err)
+				}
 			}
 		}
 
@@ -1575,7 +2103,7 @@ func (t *transformer) collectPlacedCallSites() error {
 			placeByName[pd.name] = pd
 		}
 		used := map[string]bool{}
-		aliases := map[string]string{}
+		aliases := map[string]placeBinding{}
 		for idx, arg := range argRanges {
 			argSrc := strings.TrimSpace(string(t.src[t.off(t.toks[arg[0]].pos):t.off(t.toks[arg[1]].pos)]))
 			isBareIdent := arg[1]-arg[0] == 1 && t.toks[arg[0]].tok == token.IDENT
@@ -1585,7 +2113,7 @@ func (t *transformer) collectPlacedCallSites() error {
 					return fmt.Errorf("%s: channel parameter %q of proc %q must be bound by a 'place NAME at link[EXPR]' statement in this placed-par clause before calling %q; got argument %q", t.file.Position(callPos), names[idx], callee, callee, argSrc)
 				}
 				used[argSrc] = true
-				aliases[names[idx]] = pd.idxExpr
+				aliases[names[idx]] = placeBinding{idxExpr: pd.idxExpr, elemType: elemTypes[idx]}
 			} else {
 				if isPlaceName {
 					return fmt.Errorf("%s: place binding %q may not be passed to %q's non-channel parameter %q", t.file.Position(pd.pos), argSrc, callee, names[idx])
@@ -1667,29 +2195,29 @@ func (t *transformer) checkNoNestedPlacedPar() error {
 // which stay unsupported for an aliased link exactly like a literal
 // `link[...]` already is.
 func (t *transformer) isPlaceAlias(i int) bool {
-	_, ok := t.resolvePlaceAlias(i)
+	_, _, ok := t.resolvePlaceAlias(i)
 	return ok
 }
 
 // resolvePlaceAlias reports whether the identifier token at i is a
 // place-alias name usable at this position — i.e. it falls within some
 // proc/func body that declared it via `place NAME at link[EXPR]` (see
-// collectPlaceAliases) — returning the link index expression's source
-// text it stands for.
-func (t *transformer) resolvePlaceAlias(i int) (idxExpr string, ok bool) {
+// collectPlacedCallSites) — returning the link index expression's source
+// text and the callee's own declared element type it stands for.
+func (t *transformer) resolvePlaceAlias(i int) (idxExpr, elemType string, ok bool) {
 	if t.toks[i].tok != token.IDENT {
-		return "", false
+		return "", "", false
 	}
 	name := t.toks[i].lit
 	for _, scope := range t.placeAliases {
 		if i < scope.bodyLo || i >= scope.bodyHi {
 			continue
 		}
-		if idx, found := scope.aliases[name]; found {
-			return idx, true
+		if b, found := scope.aliases[name]; found {
+			return b.idxExpr, b.elemType, true
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // matchLinkReceive recognizes `link[idx] -> var` as a whole statement, or
@@ -1697,7 +2225,7 @@ func (t *transformer) resolvePlaceAlias(i int) (idxExpr string, ok bool) {
 // at link[EXPR]` declaration in this same proc/func body (see
 // resolvePlaceAlias) — `link` is Bil's reserved, index-addressed array of
 // nearest-neighbour links (an emulator concept: see
-// ../../emulator/README.md and its nodeprog/bilink package), not a real
+// ../../emulator/README.md and its bilink package), not a real
 // Go channel — the physical link crosses a WASM-instance/Worker boundary,
 // which no in-process Go channel can express. `link[idx]` already parses
 // as an ordinary primary expression (parsePrimaryExpr handles `base[idx]`
@@ -1712,40 +2240,48 @@ func (t *transformer) resolvePlaceAlias(i int) (idxExpr string, ok bool) {
 // with no comma-ok suffix is supported for now — `link[idx] :-> var`
 // (declare) and `link[idx] -> var, ok` (comma-ok) aren't part of this
 // construct yet, for either spelling.
-func (t *transformer) matchLinkReceive(lo, hi int) (idxSrc, varSrc string, end int, ok bool) {
+// elemType is always reported: "int32" for a literal `link[idx]` (which
+// carries no declared payload type of its own, and always has -- the
+// original, single-word behavior) or for an alias whose callee parameter
+// is itself plain int32; otherwise the callee's own declared element
+// type, already validated and cached in t.chanShapes by
+// collectPlacedCallSites before transform() ever calls this.
+func (t *transformer) matchLinkReceive(lo, hi int) (idxSrc, varSrc, elemType string, end int, ok bool) {
 	if lo >= hi || t.toks[lo].tok != token.IDENT {
-		return "", "", 0, false
+		return "", "", "", 0, false
 	}
 	isLiteralLink := t.toks[lo].lit == "link"
-	var aliasIdx string
+	var aliasIdx, aliasElemType string
 	if !isLiteralLink {
-		aliasIdx, ok = t.resolvePlaceAlias(lo)
+		aliasIdx, aliasElemType, ok = t.resolvePlaceAlias(lo)
 		if !ok {
-			return "", "", 0, false
+			return "", "", "", 0, false
 		}
 	}
 	rhsLo, rhsHi, lhsEnd, kind, _, hasOk, matchEnd, isCall, ok := t.matchArrowReceive(lo, hi)
 	if !ok || isCall || kind != arrowAssign || hasOk {
-		return "", "", 0, false
+		return "", "", "", 0, false
 	}
 	if isLiteralLink {
 		if lo+1 >= hi || t.toks[lo+1].tok != token.LBRACK {
-			return "", "", 0, false
+			return "", "", "", 0, false
 		}
 		open := lo + 1
 		close := matchBracket(t.toks, open)
 		if close+1 != lhsEnd {
-			return "", "", 0, false // trailing chain past `link[idx]` — not supported
+			return "", "", "", 0, false // trailing chain past `link[idx]` — not supported
 		}
 		idxSrc = string(t.src[t.off(t.toks[open+1].pos):t.off(t.toks[close].pos)])
+		elemType = "int32"
 	} else {
 		if lhsEnd != lo+1 {
-			return "", "", 0, false // trailing chain past a bare alias — not supported
+			return "", "", "", 0, false // trailing chain past a bare alias — not supported
 		}
 		idxSrc = aliasIdx
+		elemType = aliasElemType
 	}
 	varSrc = string(t.src[t.off(t.toks[rhsLo].pos):t.off(t.toks[rhsHi].pos)])
-	return idxSrc, varSrc, matchEnd, true
+	return idxSrc, varSrc, elemType, matchEnd, true
 }
 
 // matchLinkSend recognizes `link[idx] <- value` as a whole statement, or
@@ -1759,32 +2295,36 @@ func (t *transformer) matchLinkReceive(lo, hi int) (idxSrc, varSrc string, end i
 // line end, or the block's closing `}`), tracking paren/bracket/brace
 // depth so a nested call or composite literal in the value expression
 // doesn't end the scan early.
-func (t *transformer) matchLinkSend(lo, hi int) (idxSrc, valSrc string, end int, ok bool) {
+// elemType is reported exactly as matchLinkReceive's own doc comment
+// describes.
+func (t *transformer) matchLinkSend(lo, hi int) (idxSrc, valSrc, elemType string, end int, ok bool) {
 	if !t.isStmtStart(lo) {
-		return "", "", 0, false
+		return "", "", "", 0, false
 	}
 	if lo >= hi || t.toks[lo].tok != token.IDENT {
-		return "", "", 0, false
+		return "", "", "", 0, false
 	}
 	var closeAfter int // index of the last token of the index/alias expression
 	if t.toks[lo].lit == "link" {
 		if lo+1 >= hi || t.toks[lo+1].tok != token.LBRACK {
-			return "", "", 0, false
+			return "", "", "", 0, false
 		}
 		open := lo + 1
 		close := matchBracket(t.toks, open)
 		idxSrc = string(t.src[t.off(t.toks[open+1].pos):t.off(t.toks[close].pos)])
+		elemType = "int32"
 		closeAfter = close
 	} else {
-		aliasIdx, aliasOK := t.resolvePlaceAlias(lo)
+		aliasIdx, aliasElemType, aliasOK := t.resolvePlaceAlias(lo)
 		if !aliasOK {
-			return "", "", 0, false
+			return "", "", "", 0, false
 		}
 		idxSrc = aliasIdx
+		elemType = aliasElemType
 		closeAfter = lo
 	}
 	if closeAfter+1 >= hi || t.toks[closeAfter+1].tok != token.ARROW {
-		return "", "", 0, false
+		return "", "", "", 0, false
 	}
 	valLo := closeAfter + 2
 	depth := 0
@@ -1809,10 +2349,10 @@ func (t *transformer) matchLinkSend(lo, hi int) (idxSrc, valSrc string, end int,
 	}
 foundEnd:
 	if j == valLo || j >= hi {
-		return "", "", 0, false
+		return "", "", "", 0, false
 	}
 	valSrc = string(t.src[t.off(t.toks[valLo].pos):t.off(t.toks[j].pos)])
-	return idxSrc, valSrc, j, true
+	return idxSrc, valSrc, elemType, j, true
 }
 
 // matchSwitchTypeGuard recognizes `CHAN :-> V.(type)` immediately after a
@@ -2147,7 +2687,7 @@ func (t *transformer) emitPlacedCallLeaf(out *bytes.Buffer, lo, hi int) {
 	if !found {
 		panic(fmt.Sprintf("placed par calls undeclared proc %q", callee))
 	}
-	_, dirs := t.paramNamesAndDirections(br.paramsLo, br.paramsHi)
+	_, dirs, _ := t.paramNamesAndDirections(br.paramsLo, br.paramsHi)
 	out.WriteString(callee + "(")
 	for idx, arg := range argRanges {
 		if idx > 0 {
@@ -2253,7 +2793,7 @@ func (t *transformer) collectResolvedLeaves(lo, hi int) ([]resolvedLeaf, error) 
 		if !found {
 			return fmt.Errorf("placed par calls undeclared proc %q", callee)
 		}
-		names, dirs := t.paramNamesAndDirections(br.paramsLo, br.paramsHi)
+		names, dirs, _ := t.paramNamesAndDirections(br.paramsLo, br.paramsHi)
 		placeByName := make(map[string]placeDeclBinding, len(placeDecls))
 		for _, pd := range placeDecls {
 			placeByName[pd.name] = pd
@@ -2741,15 +3281,33 @@ func (t *transformer) transform(lo, hi int) []byte {
 			}
 
 		case tk.tok == token.IDENT:
-			if idxSrc, varSrc, end, ok := t.matchLinkReceive(i, hi); ok {
+			if idxSrc, varSrc, elemType, end, ok := t.matchLinkReceive(i, hi); ok {
 				flushTo(t.off(tk.pos))
-				out.WriteString(varSrc + " = bilink.Recv(" + idxSrc + ")")
+				if elemType == "" || elemType == "int32" {
+					out.WriteString(varSrc + " = bilink.Recv(" + idxSrc + ")")
+				} else {
+					// Already resolved and validated by
+					// collectPlacedCallSites -- this can't fail here.
+					leaves, err := t.resolveChanShape(elemType)
+					if err != nil {
+						panic(fmt.Sprintf("internal error: %q's shape was validated but won't re-resolve: %v", elemType, err))
+					}
+					out.WriteString(t.emitLinkRecv(idxSrc, varSrc, leaves))
+				}
 				cursor = t.off(t.toks[end].pos)
 				i = end
 				t.usedLink = true
-			} else if idxSrc, valSrc, end, ok := t.matchLinkSend(i, hi); ok {
+			} else if idxSrc, valSrc, elemType, end, ok := t.matchLinkSend(i, hi); ok {
 				flushTo(t.off(tk.pos))
-				out.WriteString("bilink.Send(" + idxSrc + ", " + valSrc + ")")
+				if elemType == "" || elemType == "int32" {
+					out.WriteString("bilink.Send(" + idxSrc + ", " + valSrc + ")")
+				} else {
+					leaves, err := t.resolveChanShape(elemType)
+					if err != nil {
+						panic(fmt.Sprintf("internal error: %q's shape was validated but won't re-resolve: %v", elemType, err))
+					}
+					out.WriteString(t.emitLinkSend(idxSrc, valSrc, leaves))
+				}
 				cursor = t.off(t.toks[end].pos)
 				i = end
 				t.usedLink = true
@@ -3115,15 +3673,6 @@ func transformSource(filename string, src []byte, roleOverride string) ([]byte, 
 	}
 	pkgEnd += pkgStart
 	var full bytes.Buffer
-	if t.usedLink || t.usedPlacement {
-		// bilink only exists under this build constraint (it's backed by
-		// syscall/js) -- a program using `link[...]` or `placed par`
-		// (which also calls into bilink, for Row()/Col()/ID()) can only
-		// ever run there, so this is auto-injected the same way the
-		// import is, rather than left for whoever places the generated
-		// file to remember by hand.
-		full.WriteString("//go:build js && wasm\n\n")
-	}
 	full.Write(body[:pkgEnd])
 	full.WriteString(importSync)
 	if t.usedStop && !t.hasImport("time") {
@@ -3132,8 +3681,11 @@ func transformSource(filename string, src []byte, roleOverride string) ([]byte, 
 	if t.usedAltN && !t.hasImport("reflect") {
 		full.WriteString("\nimport \"reflect\"\n")
 	}
-	if (t.usedLink || t.usedPlacement) && !t.hasImport("emulator/nodeprog/bilink") {
-		full.WriteString("\nimport \"emulator/nodeprog/bilink\"\n")
+	if t.usedLinkFloat && !t.hasImport("math") {
+		full.WriteString("\nimport \"math\"\n")
+	}
+	if (t.usedLink || t.usedPlacement) && !t.hasImport("emulator/bilink") {
+		full.WriteString("\nimport \"emulator/bilink\"\n")
 	}
 	full.Write(body[pkgEnd:])
 	full.WriteString(parHelper)
@@ -3145,6 +3697,9 @@ func transformSource(filename string, src []byte, roleOverride string) ([]byte, 
 	}
 	if t.usedAltN {
 		full.WriteString(altNHelper)
+	}
+	if t.usedLinkBool {
+		full.WriteString(boolWordHelper)
 	}
 
 	return format.Source(full.Bytes())

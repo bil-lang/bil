@@ -299,16 +299,6 @@ func runAttention(xs [][dModel]float64) [][dModel]float64 {
 	return resid1
 }
 
-// f32bits/f32val convert one [dModel]float64 vector's component to and
-// from the raw int32 bit pattern that actually crosses a physical
-// link -- the link fabric only carries a plain int32 per hop (see
-// bilink.Send/Recv), the same "one int32 at a time" idiom Example 21
-// used for scalar tokens. Pure bit-twiddling, no channel involved, so
-// -- unlike a send/receive loop itself -- these are safe to factor out
-// into ordinary top-level funcs.
-func f32bits(x float64) int32   { return int32(math.Float32bits(float32(x))) }
-func f32val(bits int32) float64 { return float64(math.Float32frombits(uint32(bits))) }
-
 // embedStage runs on every column of row 0: computes this
 // generation's synthetic input token locally (the same
 // (col+gen)%vocabSize convention Example 21's relay/rowEnd used),
@@ -318,20 +308,13 @@ func f32val(bits int32) float64 { return float64(math.Float32frombits(uint32(bit
 // column, unlike Example 21 where one processor did every column's
 // embedding serially. south is the only link this role ever touches.
 //
-// sendSouth is a closure, not a top-level func: `place`-bound channel
-// parameters are resolved by bilc at compile time, purely from their
-// literal name appearing directly inside the *placed-called proc's own
-// body* -- a channel handed to a separately-compiled helper function is
-// just a nil value at runtime (nothing ever fills it in), so every
-// proc below defines its own tiny send/recv closures over its own
-// channel parameters instead of sharing one.
-proc embedStage(south chan<- int32) {
-	sendSouth := func(v [dModel]float64) {
-		for i := range dModel {
-			south <- f32bits(v[i])
-		}
-	}
-
+// south's element type is [dModel]float64 directly -- bilc resolves a
+// placed channel's payload shape (a plain struct or fixed-size array of
+// int/int32/bool/float32/float64) into the same "one int32 word per
+// component" encoding a hand-written send/receive loop used to need,
+// generating it instead: `south <- x0` below expands to exactly dModel
+// bilink.Send calls, one per component, in index order.
+proc embedStage(south chan<- [dModel]float64) {
 	c := bilink.Col()
 	bilink.Screenf("embed ready at col %d", c)
 
@@ -339,7 +322,7 @@ proc embedStage(south chan<- int32) {
 		tok := (c + gen) % vocabSize
 		x0 := add4(embedding[tok], posEncode(c))
 		time.Sleep(hopDelay)
-		sendSouth(x0)
+		south <- x0
 		bilink.Screenf("gen %d: embedded %q", gen, wordAt(tok))
 	}
 
@@ -358,57 +341,28 @@ proc embedStage(south chan<- int32) {
 // 2 -- exactly what every other attention-row column does with
 // theirs. East is used both ways (gather in, scatter out), so it
 // needs two directional parameters bound to the same physical link.
-proc attnController(north <-chan int32, eastIn <-chan int32, eastOut chan<- int32, south chan<- int32) {
-	recvNorth := func() [dModel]float64 {
-		var v [dModel]float64
-		for i := range dModel {
-			var bits int32
-			north -> bits
-			v[i] = f32val(bits)
-		}
-		return v
-	}
-	recvEast := func() [dModel]float64 {
-		var v [dModel]float64
-		for i := range dModel {
-			var bits int32
-			eastIn -> bits
-			v[i] = f32val(bits)
-		}
-		return v
-	}
-	sendEast := func(v [dModel]float64) {
-		for i := range dModel {
-			eastOut <- f32bits(v[i])
-		}
-	}
-	sendSouth := func(v [dModel]float64) {
-		for i := range dModel {
-			south <- f32bits(v[i])
-		}
-	}
-
+proc attnController(north <-chan [dModel]float64, eastIn <-chan [dModel]float64, eastOut chan<- [dModel]float64, south chan<- [dModel]float64) {
 	cols := bilink.NumCols()
 	bilink.Screenf("attn controller ready, %d cols", cols)
 
 	for gen := range generations {
 		xs := make([][dModel]float64, cols)
-		xs[0] = recvNorth()
+		north -> xs[0]
 
 		for r := cols - 1; r >= 1; r-- {
 			time.Sleep(hopDelay)
-			xs[r] = recvEast()
+			eastIn -> xs[r]
 		}
 
 		resid1 := runAttention(xs)
 
 		for s := 1; s < cols; s++ {
 			time.Sleep(hopDelay)
-			sendEast(resid1[s])
+			eastOut <- resid1[s]
 		}
 
 		time.Sleep(hopDelay)
-		sendSouth(resid1[0])
+		south <- resid1[0]
 		bilink.Screenf("gen %d: attended", gen)
 	}
 
@@ -425,66 +379,25 @@ proc attnController(north <-chan int32, eastIn <-chan int32, eastOut chan<- int3
 // relay proc, generalized from one int32 per round to a whole
 // [dModel]float64 per round. Both east and west are used bidirectionally,
 // so each gets two directional parameters bound to the same link.
-proc attnRelay(north <-chan int32, eastIn <-chan int32, westOut chan<- int32, westIn <-chan int32, eastOut chan<- int32, south chan<- int32) {
-	recvNorth := func() [dModel]float64 {
-		var v [dModel]float64
-		for i := range dModel {
-			var bits int32
-			north -> bits
-			v[i] = f32val(bits)
-		}
-		return v
-	}
-	recvEast := func() [dModel]float64 {
-		var v [dModel]float64
-		for i := range dModel {
-			var bits int32
-			eastIn -> bits
-			v[i] = f32val(bits)
-		}
-		return v
-	}
-	recvWest := func() [dModel]float64 {
-		var v [dModel]float64
-		for i := range dModel {
-			var bits int32
-			westIn -> bits
-			v[i] = f32val(bits)
-		}
-		return v
-	}
-	sendWest := func(v [dModel]float64) {
-		for i := range dModel {
-			westOut <- f32bits(v[i])
-		}
-	}
-	sendEast := func(v [dModel]float64) {
-		for i := range dModel {
-			eastOut <- f32bits(v[i])
-		}
-	}
-	sendSouth := func(v [dModel]float64) {
-		for i := range dModel {
-			south <- f32bits(v[i])
-		}
-	}
-
+proc attnRelay(north <-chan [dModel]float64, eastIn <-chan [dModel]float64, westOut chan<- [dModel]float64, westIn <-chan [dModel]float64, eastOut chan<- [dModel]float64, south chan<- [dModel]float64) {
 	c := bilink.Col()
 	cols := bilink.NumCols()
 	bilink.Screenf("attn relay ready at col %d", c)
 
 	for gen := range generations {
-		myVec := recvNorth()
+		var myVec [dModel]float64
+		north -> myVec
 
 		for r := cols - 1; r >= 1; r-- {
 			switch {
 			case r == c:
 				time.Sleep(hopDelay)
-				sendWest(myVec)
+				westOut <- myVec
 			case r > c:
-				v := recvEast()
+				var v [dModel]float64
+				eastIn -> v
 				time.Sleep(hopDelay)
-				sendWest(v)
+				westOut <- v
 			}
 		}
 
@@ -492,16 +405,17 @@ proc attnRelay(north <-chan int32, eastIn <-chan int32, westOut chan<- int32, we
 		for s := 1; s < cols; s++ {
 			switch {
 			case s == c:
-				mine = recvWest()
+				westIn -> mine
 			case s > c:
-				v := recvWest()
+				var v [dModel]float64
+				westIn -> v
 				time.Sleep(hopDelay)
-				sendEast(v)
+				eastOut <- v
 			}
 		}
 
 		time.Sleep(hopDelay)
-		sendSouth(mine)
+		south <- mine
 		bilink.Screenf("gen %d: relayed", gen)
 	}
 
@@ -514,46 +428,19 @@ proc attnRelay(north <-chan int32, eastIn <-chan int32, westOut chan<- int32, we
 // destination for exactly one scatter round, then forwards its own
 // result south -- unlike attnRelay it needs no round loop at all. West
 // is used both ways, so it gets two directional parameters.
-proc attnRowEnd(north <-chan int32, westOut chan<- int32, westIn <-chan int32, south chan<- int32) {
-	recvNorth := func() [dModel]float64 {
-		var v [dModel]float64
-		for i := range dModel {
-			var bits int32
-			north -> bits
-			v[i] = f32val(bits)
-		}
-		return v
-	}
-	recvWest := func() [dModel]float64 {
-		var v [dModel]float64
-		for i := range dModel {
-			var bits int32
-			westIn -> bits
-			v[i] = f32val(bits)
-		}
-		return v
-	}
-	sendWest := func(v [dModel]float64) {
-		for i := range dModel {
-			westOut <- f32bits(v[i])
-		}
-	}
-	sendSouth := func(v [dModel]float64) {
-		for i := range dModel {
-			south <- f32bits(v[i])
-		}
-	}
-
+proc attnRowEnd(north <-chan [dModel]float64, westOut chan<- [dModel]float64, westIn <-chan [dModel]float64, south chan<- [dModel]float64) {
 	bilink.Screenf("attn row-end ready at col %d", bilink.Col())
 
 	for gen := range generations {
-		myVec := recvNorth()
+		var myVec [dModel]float64
+		north -> myVec
 		time.Sleep(hopDelay)
-		sendWest(myVec)
+		westOut <- myVec
 
-		mine := recvWest()
+		var mine [dModel]float64
+		westIn -> mine
 		time.Sleep(hopDelay)
-		sendSouth(mine)
+		south <- mine
 		bilink.Screenf("gen %d: row-end relayed", gen)
 	}
 
@@ -567,29 +454,15 @@ proc attnRowEnd(north <-chan int32, westOut chan<- int32, westIn <-chan int32, s
 // residual connection, hand the result south to row 3. No lateral
 // communication: every column of row 2 runs this fully in parallel
 // with every other column.
-proc ffnStage(north <-chan int32, south chan<- int32) {
-	recvNorth := func() [dModel]float64 {
-		var v [dModel]float64
-		for i := range dModel {
-			var bits int32
-			north -> bits
-			v[i] = f32val(bits)
-		}
-		return v
-	}
-	sendSouth := func(v [dModel]float64) {
-		for i := range dModel {
-			south <- f32bits(v[i])
-		}
-	}
-
+proc ffnStage(north <-chan [dModel]float64, south chan<- [dModel]float64) {
 	bilink.Screenf("ffn ready at col %d", bilink.Col())
 
 	for range generations {
-		resid1 := recvNorth()
+		var resid1 [dModel]float64
+		north -> resid1
 		resid2 := add4(resid1, feedForward(resid1))
 		time.Sleep(hopDelay)
-		sendSouth(resid2)
+		south <- resid2
 	}
 
 	bilink.Screenf("ffn done")
@@ -601,22 +474,13 @@ proc ffnStage(north <-chan int32, south chan<- int32) {
 // to vocabulary logits, argmax to a predicted token, done. The
 // prediction never needs to travel anywhere else, since embedStage
 // already knows (and logged) what token it started from.
-proc outputStage(north <-chan int32) {
-	recvNorth := func() [dModel]float64 {
-		var v [dModel]float64
-		for i := range dModel {
-			var bits int32
-			north -> bits
-			v[i] = f32val(bits)
-		}
-		return v
-	}
-
+proc outputStage(north <-chan [dModel]float64) {
 	c := bilink.Col()
 	bilink.Screenf("output ready at col %d", c)
 
 	for gen := range generations {
-		resid2 := recvNorth()
+		var resid2 [dModel]float64
+		north -> resid2
 		predicted := argmax4(outputLogits(resid2))
 		bilink.Screenf("gen %d: col %d -> %q", gen, c, wordAt(predicted))
 	}
