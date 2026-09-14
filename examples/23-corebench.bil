@@ -1,0 +1,131 @@
+// Copyright (c) 2026 Stephen Roe. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+//
+// A LINPACK-style CPU-bound benchmark, built to make the emulator's
+// native core-mapped backend (../../emulator, a sibling repo -- see
+// cmd/coreemu and its README's "Native core emulator" section) visibly
+// use however many real CPU cores a launch asks for. "LINPACK-style"
+// means a dense matrix-multiply-accumulate kernel in the same spirit as
+// the classic benchmark, not the certified LINPACK suite itself (no
+// fixed problem size, no partial-pivoting compliance).
+//
+// Placement is a single row, wildcarded across however many columns a
+// launch has (`processor(0, *)`), the same "one role, replicated across
+// whatever this launch's grid size turns out to be" idiom Example 10
+// (mesh-ripple) already establishes -- so the exact same compiled roles
+// run unmodified whether launched at 1, 2, 4, or 8 columns; core count is
+// purely a launch-time choice
+// (`coreemu -dir nodeprog/corebench -rows 1 -cols N`), never a rebuild.
+//
+// Each column runs its own share of the kernel against a fixed
+// wall-clock time budget rather than a fixed amount of work -- so total
+// run time stays roughly constant across every core count (reliably
+// visible for several seconds in a tool like Activity Monitor regardless
+// of N), and the number of block-multiplies completed -- the throughput
+// -- is the metric that actually changes with core count, which is the
+// point of the comparison. Once its budget is spent, each column adds
+// whatever total the columns further east have already summed (if any)
+// and relays the running total one hop west; column 0 (`sink`) has
+// nowhere further west to relay to, so it prints the row's grand total
+// and achieved throughput instead. `bilink.LinkWired` (see
+// emulator/nodeprog/bilink/bilink.go) is what lets `worker` use the same
+// generated code whether or not it happens to be the row's last column
+// (with no link further east) -- no separate rowEnd-style role needed,
+// unlike Example 20's controller/rowEnd/relay split.
+
+package main
+
+import "time"
+
+// budgetSeconds is how long each column spends on its own share of the
+// kernel before reporting -- long enough to be clearly visible in a
+// tool like Activity Monitor, short enough to stay interactive.
+const budgetSeconds = 5
+
+// blockSize is the dimension of the dense square block each column
+// repeatedly multiply-accumulates: big enough that one block-multiply is
+// a genuinely CPU-bound chunk of work (not dominated by loop/call
+// overhead), small enough that it's a small fraction of budgetSeconds,
+// so the elapsed-time check between block-multiplies stays responsive.
+const blockSize = 64
+
+// sink runs at column 0: the row's west end, so it has nowhere further
+// west to relay a running total to -- it reports the row's grand total
+// and achieved throughput instead.
+proc sink(eastIn <-chan int32) {
+	bilink.Screenf("sink ready, %d cols, %ds budget", bilink.NumCols(), budgetSeconds)
+	ops := runKernel()
+	total := ops
+	if bilink.LinkWired(1) {
+		var fromEast int32
+		eastIn -> fromEast
+		total += fromEast
+	}
+	bilink.Screenf("cols=%d: %d total block-multiplies in %ds (~%d/s)",
+		bilink.NumCols(), total, budgetSeconds, total/budgetSeconds)
+	stop
+}
+
+// worker runs at every other column: does its own share, adds whatever
+// the columns further east have already summed (if this isn't the row's
+// last column -- bilink.LinkWired(1) is false there), and relays the
+// running total one hop west toward the sink.
+proc worker(eastIn <-chan int32, westOut chan<- int32) {
+	bilink.Screenf("worker ready at col %d", bilink.Col())
+	ops := runKernel()
+	total := ops
+	if bilink.LinkWired(1) {
+		var fromEast int32
+		eastIn -> fromEast
+		total += fromEast
+	}
+	westOut <- total
+	stop
+}
+
+// runKernel repeats a blockSize x blockSize dense matrix multiply-
+// accumulate for budgetSeconds of wall-clock time, returning how many
+// block-multiplies it completed. Swapping the result back in as the next
+// iteration's input (rather than recomputing the same fixed A*B every
+// time) keeps every iteration doing real, distinct floating-point work.
+func runKernel() int32 {
+	var a, b, c [blockSize][blockSize]float64
+	for i := 0; i < blockSize; i++ {
+		for j := 0; j < blockSize; j++ {
+			a[i][j] = float64((i*blockSize + j) % 97)
+			b[i][j] = float64((j*blockSize + i) % 89)
+		}
+	}
+
+	deadline := time.Now().Add(budgetSeconds * time.Second)
+	var ops int32
+	for time.Now().Before(deadline) {
+		for i := 0; i < blockSize; i++ {
+			for j := 0; j < blockSize; j++ {
+				var sum float64
+				for k := 0; k < blockSize; k++ {
+					sum += a[i][k] * b[k][j]
+				}
+				c[i][j] = sum
+			}
+		}
+		a, c = c, a
+		ops++
+	}
+	return ops
+}
+
+func main() {
+	placed par {
+		processor(0, 0) {
+			place eastIn at link[1].in
+			sink(eastIn)
+		}
+		processor(0, *) {
+			place eastIn at link[1].in
+			place westOut at link[3].out
+			worker(eastIn, westOut)
+		}
+	}
+}

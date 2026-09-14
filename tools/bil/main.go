@@ -17,7 +17,7 @@ import (
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: bil run <file.bil>")
 	fmt.Fprintln(os.Stderr, "       bil vet <file.bil>")
-	fmt.Fprintln(os.Stderr, "       bil emu [-rows N] [-cols N] [-addr host:port] [-open] <file.bil>")
+	fmt.Fprintln(os.Stderr, "       bil emu [-target wasm|multicore] [-rows N] [-cols N] [-addr host:port] [-open] <file.bil>")
 }
 
 func main() {

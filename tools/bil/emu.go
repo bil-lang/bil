@@ -26,6 +26,8 @@ func emuMain(args []string, stdout, stderr io.Writer) int {
 	// No backtick-quoted words in these usage strings -- flag.PrintDefaults
 	// treats a single back-quoted substring as the flag's value-type name
 	// (e.g. would print "-cols placed par" instead of "-cols int").
+	target := fs.String("target", "wasm", "execution backend: wasm (browser/WASM grid, "+
+		"emulator/cmd/wasm) or multicore (native OS-process-per-core grid, emulator/cmd/multicore)")
 	rows := fs.Int("rows", 0, "grid rows (0 = auto: 1 for a plain chan/proc/par program,"+
 		" or the smallest grid that gives every placed processor its own node"+
 		" for a placed-par program -- see -cols)")
@@ -33,10 +35,10 @@ func emuMain(args []string, stdout, stderr io.Writer) int {
 		" program onto too small a grid can silently under-exercise it -- e.g."+
 		" processor(0,0) and processor(0,cols-1) collide into the same generated"+
 		" Go switch case when cols=1, and only the first match ever fires")
-	addr := fs.String("addr", "localhost:8787", "address for the emulator's static file server to listen on")
-	open := fs.Bool("open", true, "open the default browser once the server is ready")
+	addr := fs.String("addr", "localhost:8787", "wasm target only: address for the emulator's static file server to listen on")
+	open := fs.Bool("open", true, "wasm target only: open the default browser once the server is ready")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: bil emu [-rows N] [-cols N] [-addr host:port] [-open] <file.bil>")
+		fmt.Fprintln(stderr, "usage: bil emu [-target wasm|multicore] [-rows N] [-cols N] [-addr host:port] [-open] <file.bil>")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -46,17 +48,26 @@ func emuMain(args []string, stdout, stderr io.Writer) int {
 		fs.Usage()
 		return 2
 	}
-	return emuCmd(fs.Arg(0), *rows, *cols, *addr, *open, stdout, stderr)
+	if *target != "wasm" && *target != "multicore" {
+		fmt.Fprintf(stderr, "bil emu: -target must be \"wasm\" or \"multicore\", got %q\n", *target)
+		return 2
+	}
+	return emuCmd(fs.Arg(0), *target, *rows, *cols, *addr, *open, stdout, stderr)
 }
 
 // emuCmd transpiles src with bilc, vets it (refusing to proceed on any
 // violation, exactly like runCmd's execute=true path), detects placement
-// via bilc.RoleBinaries/DeployManifest, and runs the result inside the
-// browser/WASM grid emulator at a sibling ../emulator checkout instead of
-// natively -- see emulator/README.md's Install section for that
-// convention, which this reuses rather than inventing an env var or
-// config override.
-func emuCmd(src string, rows, cols int, addr string, openBrowser bool, stdout, stderr io.Writer) int {
+// via bilc.RoleBinaries/DeployManifest, and hands the built role sources
+// to one of two execution backends at a sibling ../emulator checkout
+// (see emulator/README.md's Install section for that convention, which
+// this reuses rather than inventing an env var or config override):
+// "wasm" (the default, matching this command's original and only
+// behavior) runs them in the browser/WASM grid; "multicore" runs them as
+// real native OS processes, one per CPU core, via emulator/cmd/multicore.
+// Both share everything through transpiling and writing role sources to
+// a scratch dir -- see runWasmTarget/runMulticoreTarget for where they
+// actually diverge.
+func emuCmd(src, target string, rows, cols int, addr string, openBrowser bool, stdout, stderr io.Writer) int {
 	in, err := os.ReadFile(src)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -84,13 +95,13 @@ func emuCmd(src string, rows, cols int, addr string, openBrowser bool, stdout, s
 	// par usage: its importer (go/importer's "source" mode, see
 	// tools/vet/check.go) does classic GOPATH-style resolution with no
 	// real Go-modules awareness, so it can never resolve
-	// "emulator/nodeprog/bilink" -- not a location problem, moving the
-	// file doesn't help. This is the exact same, already-accepted
-	// limitation `bil vet`/`bil run` have always had on these programs
-	// (confirmed directly: `bil vet` on a link/placed-par example fails
-	// identically) -- the emulator's own `go build` step (module-aware,
-	// unlike vet's importer) is what actually verifies these programs,
-	// same as it always has.
+	// "emulator/bilink" -- not a location problem, moving the file
+	// doesn't help. This is the exact same, already-accepted limitation
+	// `bil vet`/`bil run` have always had on these programs (confirmed
+	// directly: `bil vet` on a link/placed-par example fails identically)
+	// -- the emulator's own `go build` step (module-aware, unlike vet's
+	// importer) is what actually verifies these programs, same as it
+	// always has, for either backend.
 	if roles == nil {
 		tmp, err := os.CreateTemp("", "bil-emu-*.go")
 		if err != nil {
@@ -121,52 +132,15 @@ func emuCmd(src string, rows, cols int, addr string, openBrowser bool, stdout, s
 		}
 	}
 
-	scratchDir, err := os.MkdirTemp(filepath.Join(emulatorDir, "nodeprog"), "bilemu-*")
-	if err != nil {
-		fmt.Fprintln(stderr, "creating build scratch dir:", err)
-		return 1
-	}
-	defer os.RemoveAll(scratchDir)
-
-	serveDir, err := os.MkdirTemp("", "bil-emu-serve-*")
-	if err != nil {
-		fmt.Fprintln(stderr, "creating serve dir:", err)
-		return 1
-	}
-	defer os.RemoveAll(serveDir)
-
-	for _, name := range []string{"index.html", "node-worker.js", "wasm_exec.js"} {
-		if err := copyFile(filepath.Join(emulatorDir, "static", name), filepath.Join(serveDir, name)); err != nil {
-			fmt.Fprintln(stderr, "copying static assets:", err)
-			return 1
-		}
-	}
-
-	if roles == nil {
-		// No placement -- one binary, no roles/deploy.json at all. index.html's
-		// own startGrid falls back to this shape whenever roles/deploy.json
-		// 404s, so nothing else needs to know which path ran.
-		if rows == 0 {
-			rows = 1
-		}
-		if cols == 0 {
-			cols = 1
-		}
-		if err := os.WriteFile(filepath.Join(scratchDir, "main.go"), out, 0o644); err != nil {
-			fmt.Fprintln(stderr, err)
-			return 1
-		}
-		if err := goBuildWasm(scratchDir, filepath.Join(serveDir, "node.wasm")); err != nil {
-			fmt.Fprintln(stderr, "building node.wasm:", err)
-			return 1
-		}
-	} else {
-		manifest, err := bilc.DeployManifest(src, in)
-		if err != nil {
-			fmt.Fprintln(stderr, "deploy manifest error:", err)
-			return 1
-		}
-		if rows == 0 || cols == 0 {
+	if rows == 0 || cols == 0 {
+		if roles == nil {
+			rows, cols = 1, 1
+		} else {
+			manifest, err := bilc.DeployManifest(src, in)
+			if err != nil {
+				fmt.Fprintln(stderr, "deploy manifest error:", err)
+				return 1
+			}
 			inferredRows, inferredCols, err := inferGridSize(manifest)
 			if err != nil {
 				fmt.Fprintln(stderr, "inferring grid size:", err)
@@ -179,9 +153,31 @@ func emuCmd(src string, rows, cols int, addr string, openBrowser bool, stdout, s
 				cols = inferredCols
 			}
 		}
-		rolesDir := filepath.Join(serveDir, "roles")
-		if err := os.MkdirAll(rolesDir, 0o755); err != nil {
+	}
+
+	// scratchDir holds the transpiled role source(s) -- plain Go, not yet
+	// built for any particular target -- exactly the on-disk shape
+	// emulator/README.md's own Quickstart produces by hand
+	// (nodeprog/<name>/main.go, or roles/*/main.go + roles/deploy.json).
+	// It lives under emulatorDir/nodeprog so it resolves the "emulator"
+	// module's own go.mod, the same reason emulator/README.md's Quickstart
+	// always builds from inside the emulator checkout.
+	scratchDir, err := os.MkdirTemp(filepath.Join(emulatorDir, "nodeprog"), "bilemu-*")
+	if err != nil {
+		fmt.Fprintln(stderr, "creating build scratch dir:", err)
+		return 1
+	}
+	defer os.RemoveAll(scratchDir)
+
+	if roles == nil {
+		if err := os.WriteFile(filepath.Join(scratchDir, "main.go"), out, 0o644); err != nil {
 			fmt.Fprintln(stderr, err)
+			return 1
+		}
+	} else {
+		manifest, err := bilc.DeployManifest(src, in)
+		if err != nil {
+			fmt.Fprintln(stderr, "deploy manifest error:", err)
 			return 1
 		}
 		for role, roleSrc := range roles {
@@ -194,21 +190,75 @@ func emuCmd(src string, rows, cols int, addr string, openBrowser bool, stdout, s
 				fmt.Fprintln(stderr, err)
 				return 1
 			}
-			if err := goBuildWasm(roleScratch, filepath.Join(rolesDir, role+".wasm")); err != nil {
-				fmt.Fprintln(stderr, fmt.Sprintf("building role %q: %v", role, err))
-				return 1
-			}
 		}
-		if err := os.WriteFile(filepath.Join(rolesDir, "deploy.json"), manifest, 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(scratchDir, "roles", "deploy.json"), manifest, 0o644); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
 	}
 
-	// Build cmd/serve once and exec the binary directly, rather than
-	// `go run ./cmd/serve`: go run spawns the actual compiled binary as
-	// its own child process and does not forward a kill signal to it --
-	// confirmed directly (SIGINT-ing `go run` leaves the real serve
+	if target == "multicore" {
+		return runMulticoreTarget(emulatorDir, scratchDir, src, rows, cols, stdout, stderr)
+	}
+	return runWasmTarget(emulatorDir, scratchDir, roles != nil, src, rows, cols, addr, openBrowser, stdout, stderr)
+}
+
+// runWasmTarget builds scratchDir's role source(s) to WASM, assembles a
+// servable directory (emulator/cmd/wasm's static assets + the built
+// .wasm(es) + roles/deploy.json when placed), and runs
+// emulator/cmd/wasm to serve it, opening a browser -- this is `bil emu`'s
+// original and, until -target existed, only behavior.
+func runWasmTarget(emulatorDir, scratchDir string, placed bool, src string, rows, cols int, addr string, openBrowser bool, stdout, stderr io.Writer) int {
+	serveDir, err := os.MkdirTemp("", "bil-emu-serve-*")
+	if err != nil {
+		fmt.Fprintln(stderr, "creating serve dir:", err)
+		return 1
+	}
+	defer os.RemoveAll(serveDir)
+
+	for _, name := range []string{"index.html", "node-worker.js", "wasm_exec.js"} {
+		if err := copyFile(filepath.Join(emulatorDir, "cmd", "wasm", "static", name), filepath.Join(serveDir, name)); err != nil {
+			fmt.Fprintln(stderr, "copying static assets:", err)
+			return 1
+		}
+	}
+
+	if !placed {
+		if err := goBuildWasm(scratchDir, filepath.Join(serveDir, "node.wasm")); err != nil {
+			fmt.Fprintln(stderr, "building node.wasm:", err)
+			return 1
+		}
+	} else {
+		rolesDir := filepath.Join(serveDir, "roles")
+		if err := os.MkdirAll(rolesDir, 0o755); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		entries, err := os.ReadDir(filepath.Join(scratchDir, "roles"))
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			role := e.Name()
+			if err := goBuildWasm(filepath.Join(scratchDir, "roles", role), filepath.Join(rolesDir, role+".wasm")); err != nil {
+				fmt.Fprintf(stderr, "building role %q: %v\n", role, err)
+				return 1
+			}
+		}
+		if err := copyFile(filepath.Join(scratchDir, "roles", "deploy.json"), filepath.Join(rolesDir, "deploy.json")); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+	}
+
+	// Build emulator/cmd/wasm once and exec the binary directly, rather
+	// than `go run ./cmd/wasm`: go run spawns the actual compiled binary
+	// as its own child process and does not forward a kill signal to it
+	// -- confirmed directly (SIGINT-ing `go run` leaves the real serve
 	// process orphaned, still holding the port). Killing a directly-run
 	// binary via the context has no such gap.
 	serveBinFile, err := os.CreateTemp("", "bil-emu-serve-bin-*")
@@ -219,10 +269,10 @@ func emuCmd(src string, rows, cols int, addr string, openBrowser bool, stdout, s
 	serveBin := serveBinFile.Name()
 	serveBinFile.Close()
 	defer os.Remove(serveBin)
-	buildServe := exec.Command("go", "build", "-o", serveBin, "./cmd/serve")
+	buildServe := exec.Command("go", "build", "-o", serveBin, "./cmd/wasm")
 	buildServe.Dir = emulatorDir
 	if output, err := buildServe.CombinedOutput(); err != nil {
-		fmt.Fprintf(stderr, "building emulator's cmd/serve: %v\n%s", err, output)
+		fmt.Fprintf(stderr, "building emulator's cmd/wasm: %v\n%s", err, output)
 		return 1
 	}
 
@@ -245,9 +295,63 @@ func emuCmd(src string, rows, cols int, addr string, openBrowser bool, stdout, s
 		}
 	}
 
-	if err := serveCmd.Wait(); err != nil {
+	return waitAndTranslateExit(serveCmd, ctx, stderr)
+}
+
+// runMulticoreTarget builds emulator/cmd/multicore (which builds
+// scratchDir's role source(s) natively itself -- no WASM step at all)
+// and runs it directly against scratchDir, one real OS process per grid
+// node. There's no server or browser step for this target: each process
+// prints its own prefixed output directly to stdout/stderr, the same
+// prefixed-console model emulator/cmd/multicore/README.md documents.
+func runMulticoreTarget(emulatorDir, scratchDir, src string, rows, cols int, stdout, stderr io.Writer) int {
+	if n := runtime.NumCPU(); rows*cols > n {
+		fmt.Fprintf(stderr, "bil emu: -target multicore needs a %dx%d grid (%d processes), but this machine has only %d CPU cores -- pass smaller -rows/-cols\n", rows, cols, rows*cols, n)
+		return 1
+	}
+
+	multicoreBinFile, err := os.CreateTemp("", "bil-emu-multicore-bin-*")
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	multicoreBin := multicoreBinFile.Name()
+	multicoreBinFile.Close()
+	defer os.Remove(multicoreBin)
+	buildMulticore := exec.Command("go", "build", "-o", multicoreBin, "./cmd/multicore")
+	buildMulticore.Dir = emulatorDir
+	if output, err := buildMulticore.CombinedOutput(); err != nil {
+		fmt.Fprintf(stderr, "building emulator's cmd/multicore: %v\n%s", err, output)
+		return 1
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	fmt.Fprintf(stdout, "bil emu: running %s natively, %dx%d grid (Ctrl-C to stop)\n", src, rows, cols)
+	multicoreCmd := exec.CommandContext(ctx, multicoreBin,
+		"-dir", scratchDir,
+		"-rows", fmt.Sprint(rows),
+		"-cols", fmt.Sprint(cols),
+	)
+	multicoreCmd.Stdout = stdout
+	multicoreCmd.Stderr = stderr
+	if err := multicoreCmd.Start(); err != nil {
+		fmt.Fprintln(stderr, "starting multicore emulator:", err)
+		return 1
+	}
+
+	return waitAndTranslateExit(multicoreCmd, ctx, stderr)
+}
+
+// waitAndTranslateExit waits for cmd (already Start()ed under ctx) and
+// translates its result into emuCmd's own exit code: 0 if it was stopped
+// via Ctrl-C/SIGTERM (ctx canceled), the child's own exit code if it
+// simply exited non-zero, or 1 for any other error.
+func waitAndTranslateExit(cmd *exec.Cmd, ctx context.Context, stderr io.Writer) int {
+	if err := cmd.Wait(); err != nil {
 		if ctx.Err() != nil {
-			return 0 // stopped via Ctrl-C/SIGTERM, not a real failure
+			return 0
 		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
