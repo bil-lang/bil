@@ -2,7 +2,7 @@
 
 _Paste this file's contents alone into an AI chat prompt when asking it to write Bil — it's written to stand on its own. See also [`ai-cheatsheet.md`](ai-cheatsheet.md), a Go-framed variant of the same material._
 
-Bil's *base* language is Go — types, structs, generics, control flow, the standard library, all unchanged. But Bil's new keywords aren't invented: they're occam's own `PAR`/`SEQ`/`ALT`/`PROC`/`SKIP`/`STOP` vocabulary, kept almost verbatim (just lowercased, and `PRI ALT` kept as its own two tokens `pri alt`). If you already know occam, or CSP more generally, you already know Bil's concurrency model — map the keyword, adjust the punctuation to Go's, done. This cheatsheet pairs each new keyword, and each worked pattern, with its occam original for exactly that reason. The 7 hard rules below aren't new invented restrictions either — they're occam's own compiler-enforced variable/channel usage rules (occam 2 Reference Manual, Appendix E: a free variable written in one process can't be read in another, a channel is unidirectional between exactly two processes, and so on), which Bil's static checker (`bil vet`) re-derives and enforces on top of Go.
+Bil's *base* language is Go — types, structs, generics, control flow, the standard library, all unchanged. But Bil's new keywords aren't invented: they're occam's own `PAR`/`SEQ`/`ALT`/`PROC`/`SKIP`/`STOP` vocabulary, kept almost verbatim (just lowercased, and `PRI ALT` kept as its own two tokens `pri alt`). If you already know occam, or CSP more generally, you already know Bil's concurrency model — map the keyword, adjust the punctuation to Go's, done. This cheatsheet pairs each new keyword, and each worked pattern, with its occam counterpart for exactly that reason. The 7 hard rules below aren't new invented restrictions either — they're occam's own compiler-enforced variable/channel usage rules (occam 2 Reference Manual, Appendix E: a free variable written in one process can't be read in another, a channel is unidirectional between exactly two processes, and so on), which Bil's static checker (`bil vet`) re-derives and enforces on top of Go.
 
 The `.bil` file extension is used; a file starts `package main` exactly like Go.
 
@@ -26,6 +26,8 @@ The `.bil` file extension is used; a file starts `package main` exactly like Go.
 | `pri alt { ... }` | `PRI ALT` | Same as `alt`, but branches are tried in priority order — the first ready one wins, even if a lower-priority one is also ready. |
 | `skip` | `SKIP` | No-op that succeeds immediately. As a block (`skip { ... }`), it's also the default/non-blocking guard for an `alt` — same role occam's bare `SKIP` guard plays. |
 | `stop` | `STOP` | Deliberate, permanent halt of the current process (never returns). |
+| `placed par { processor(...) { ... } }` | `PLACED PAR` / `PROCESSOR n` | Grid-only (see "Placement" below): maps each branch to a physical processor instead of running it concurrently — compiles to one ordinary `switch`, never goroutines. `processor(id)` matches by flat ID, `processor(row, col)` by grid position; either slot of the two-arg form may be the literal `*` wildcard; a clause wildcarding both (`processor(*, *)`) is the required-last default case. |
+| `place NAME at link[EXPR].in`/`.out` | `PLACE chan AT n:` | Grid-only: binds one of the placed-called proc's own directional channel parameters to a physical link, written at the *call site* — `place eastOut at link[1].out; worker(eastOut)`. Compile-time only; no real channel involved. |
 
 Helper generics (already provided, just call them — don't redefine): `makeChans[T](n)` makes `n` channels of type `T`, the equivalent of declaring `[n]CHAN OF T`; `splitN(slice, n)` splits a slice into `n` disjoint chunks for handing to replicated workers; `splitN2D(matrix, nr, nc)` does the 2D version. None of these three have a direct occam keyword — occam programs did the equivalent by hand, per-example.
 
@@ -367,6 +369,94 @@ func main() {
 	}
 }
 ```
+
+## Placement (grid emulator only)
+
+`placed par`/`processor(...)`/`place` are a separate, optional layer on top of everything above — only relevant when the program targets Bil's WASM-worker grid emulator (a real NxM array of nodes, each its own isolated Worker wired to its 4 nearest neighbours by physical links), not for an ordinary single-machine Bil program. Rules specific to this layer, easy to get wrong:
+
+- **Physical links carry `int32` only.** `place` rewrites every send/receive on that name straight to `bilink.Send(idx, v int32)`/`bilink.Recv(idx) int32` — hardcoded, not generic. A placed channel's element type must be exactly `int32`; a struct, string, or protocol/tagged-union type (pattern 4 above) can't cross a physical link directly. To move anything wider, encode it yourself as a sequence of `int32` words (e.g. `int32(math.Float32bits(float32(x)))` for a float) and reassemble on the receiving end in the same fixed order — there's no automatic marshaling.
+- **A placed channel's receive must use `->`, never `:->`.** The declare form isn't supported for a `place`-bound name — using it silently falls through to an ordinary (and here, nil) Go channel receive, which compiles but blocks forever at runtime rather than erroring. Declare the variable with `var` first, same as any other assign-form receive.
+- **Every channel parameter of a placed-called proc needs an explicit direction** (`<-chan T`/`chan<- T`, never a bare `chan T`) and **must be bound by exactly one `place` statement** in the clause that calls it.
+- **A proc may be placed-called from at most one clause** in the whole `placed par` block — no reusing one proc as two different roles.
+- **Don't add `import "emulator/bilink"` yourself** — `bilc` injects it automatically the moment it sees `placed par` or a `place`-bound send/receive, the same way it auto-injects `"time"` for `stop`. Just call `bilink.Row()`/`Col()`/`NumRows()`/`NumCols()`/`ID()` directly for a placed proc's own position; don't take it as a parameter (a placed-called proc's non-channel parameters must be compile-time constants).
+
+occam:
+```occam
+PLACED PAR
+  PROCESSOR 0
+    PLACE out AT 1:
+    sender(out)
+  PROCESSOR 1
+    PLACE in AT 3:
+    receiver(in)
+```
+
+Bil — a counter ripples east along every row of the grid from `origin` (column 0), forwarded by `relay` (every other column, wildcarded so one clause covers every row), reflects at the last column (`reflect`), and ripples back west:
+
+```go
+package main
+
+const waves = 3
+
+proc origin(eastOut chan<- int32, eastIn <-chan int32) {
+	if bilink.NumCols() < 2 {
+		stop
+	}
+	for wave := range waves {
+		eastOut <- int32(wave)
+		eastIn -> _
+	}
+	stop
+}
+
+proc reflect(westIn <-chan int32, westOut chan<- int32) {
+	for wave := range waves {
+		var v int32
+		westIn -> v
+		westOut <- v
+	}
+	stop
+}
+
+proc relay(westIn, eastIn <-chan int32, eastOut, westOut chan<- int32) {
+	for wave := range waves {
+		var v int32
+		westIn -> v
+		eastOut <- v
+
+		var v2 int32
+		eastIn -> v2
+		westOut <- v2
+	}
+	stop
+}
+
+func main() {
+	cols := bilink.NumCols()
+
+	placed par {
+		processor(*, 0) {
+			place eastOut at link[1].out
+			place eastIn at link[1].in
+			origin(eastOut, eastIn)
+		}
+		processor(*, cols-1) {
+			place westIn at link[3].in
+			place westOut at link[3].out
+			reflect(westIn, westOut)
+		}
+		processor(*, *) {
+			place westIn at link[3].in
+			place eastIn at link[1].in
+			place eastOut at link[1].out
+			place westOut at link[3].out
+			relay(westIn, eastIn, eastOut, westOut)
+		}
+	}
+}
+```
+
+Run it with `bil emu file.bil`, not `bil run` — it needs the grid emulator, not a plain `go run`.
 
 ## If you have shell access (agentic tools only)
 
