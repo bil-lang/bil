@@ -4,13 +4,13 @@
 
 ## Overview
 
-**Bil**: a variant of Go for parallel processors.
+**Bil**: a variant of Go for parallel processor systems.
 
 Bil and Go both have concurrency models that are heavily inspired by Hoare’s CSP.
 
 Go is a general-purpose language that borrows CSP’s channel-and-process ideas but relaxes them with buffering, dynamic concurrency, and conventional shared-memory mechanisms
 
-Bil is designed specifically for parallel processor systems; influenced by CSP, by Go and by May's occam. Built on the Go toolchain, it constrains and shapes the Go concurrency model to encourage a higher level of discipline as needed by parallel systems. Bil helps coders to reason about their process models and to selectively place processes on physical processors.
+Bil is a special-purpose language for parallel processor systems; influenced by CSP, by Go and by May's occam. Built on the Go toolchain, it constrains and shapes the Go concurrency model to encourage a higher level of discipline as needed by parallel systems. Bil helps coders to reason about their process models and to selectively place processes on to physical processors.
 
 ```mermaid
 flowchart LR
@@ -614,69 +614,6 @@ graph LR
 
 ---
 
-### What bilc does with placement
-
-A `.bil` source file expresses placement with two constructs: a `placed par { processor(...) {...} ... processor(*, *) {...} }` block naming which role runs where, and `place NAME at link[EXPR].in`/`.out` statements in the calling clause binding one of that role's own declared channel parameters to a physical link. There is no separate `default` construct — it was removed as exactly, only ever, a third spelling of the fully-wild wildcard forms below. There is also no raw, unplaced `link[idx]` usage left in any example — that style (one proc, same on every node, branching internally on its own position) is a throwback to before `placed par` existed; every current example expresses heterogeneous roles through placement instead. bilc's action on these two constructs is two rewrites, a set of structural requirements it enforces around them, and two generated artifacts.
-
-**Rewrite 1 — `placed par` becomes a runtime switch.** Each `processor(id)` clause becomes `case bilink.ID() == id:`; each `processor(r, c)` clause becomes `case bilink.Row() == r && bilink.Col() == c:`. Either slot of the two-arg form may instead be a literal `*` wildcard: `processor(1, *)` matches every column of row 1 and compiles to just `case bilink.Row() == 1:` (only the pinned dimension is compared); `processor(*, 0)` matches every row's column 0 and compiles to `case bilink.Col() == 0:`. A clause that wildcards both dimensions — `processor(*)` or `processor(*, *)` — matches every node and compiles to Go's own `default:`, and must be the block's last clause, since nothing after it could ever be reached (the fully-wild clause always runs last regardless of where it's written, exactly like Go's own `default:`, so a later clause after it could never be reached). A clause's body may itself be an `if`/`else` chain rather than one bare call — each branch (recursively) either another `if`/`else` or a `place`-decls-then-one-call leaf — letting one `processor(...)` clause dispatch further by some other runtime condition (`bilink.Row() == 0`, say) without a second `placed par` (which isn't allowed to nest inside another one at all). The result is one ordinary `switch {}` in the compiled program — never a `par(...)`, never goroutines. Every node's Worker runs the exact same compiled program; which branch a given node takes depends entirely on `bilink.Row()/Col()/ID()`.
-
-**Rewrite 2 — `place NAME at link[EXPR].in`/`.out` becomes nothing at all.** It's compile-time-only, and it lives at the *call site*, not inside the called proc's own body: a proc declares ordinary directional Go channel parameters (`eastOut chan<- int32`), and the `processor(...)` clause that calls it writes `place eastOut at link[1].out; controller(eastOut)` to bind that parameter. Every reference to `eastOut` inside `controller`'s own body is rewritten straight to the equivalent `bilink.Send`/`Recv` call on link 1 — the Go channel value is never actually touched — so the call site itself passes a bare `nil` for that argument (`controller(nil)`), just enough to satisfy Go's own type-checker. The `.in`/`.out` suffix is documentation only: it says which half of the physical link this name is for, right next to the index itself, rather than leaving a reader to infer direction solely from which of the callee's two parameters this name happens to be passed to. bilc parses and discards it — it's never cross-checked against the callee's declared parameter direction, since a real check would just be re-deriving what that parameter's own type already guarantees at compile time via Go's own type-checker.
-
-**Requirements bilc enforces around both constructs.** Every one of a placed-called proc's channel parameters must be bound by exactly one `place` statement in the clause that calls it (an unbound channel parameter, or a `place` statement nobody's call ends up using, are both rejected); every non-channel parameter, conversely, must be a genuine compile-time constant at that call site — a proc needing runtime information (grid size, its own position) calls `bilink.Row()/Col()/NumRows()/NumCols()/ID()` directly, itself, rather than taking it as a parameter. Every one of those channel parameters must also be declared with an explicit direction (`<-chan T`/`chan<- T`) — a bare, undirected `chan T` (legal on an ordinary proc called from `par`/`seq`) is rejected the moment it's placed-called. This is what makes "a placed-par proc never sends and receives on the same channel" a property Go's own compiler enforces for every placed-called proc, not a best-effort heuristic: `checkProcChanBothDirections`'s own body-scan (still the rule for a non-placed proc's own undirected `chan T` parameters) walks a proc's body looking for a literal send and a literal receive on the parameter's own name, which a channel value passed through an alias (`x := ch; x -> v`) can slip past; a genuinely directional `<-chan T`/`chan<- T` closes that gap completely, since Go itself refuses to compile a receive on a send-only channel value no matter how many aliases it passes through first. Lastly, a given proc may be placed-called from at most one clause (or one `if`/`else` leaf) in the whole block — reusing the same proc as two different roles isn't supported.
-
-**Artifact 1 — one standalone Go source per role.** `RoleBinaries` emits `roles/<name>/main.go` for every distinct proc a `placed par` block calls — the whole file, unchanged, except the placed-par block compiles to a single hardcoded call to just that one role instead of the switch. Every other declaration is still emitted exactly as normal; Go's own linker, not bilc, drops whatever isn't reachable from that one call. (Measured directly: this barely shrinks the compiled `.wasm` — Go's own runtime dominates the binary, not the role code — so its real value is letting a host fetch each distinct role once instead of redundantly re-fetching one shared binary per node; see `../emulator/cmd/wasm/README.md`'s "Host and boot cascade".)
-
-**Artifact 2 — `roles/placement.json`, a manifest for a host, not a person.** The only manifest bilc produces (an earlier, deliberately incomplete `.topology.yaml` sibling was dropped as redundant with this one — see `tools/placement2svg`, which now renders straight from `placement.json` instead). It's complete and mechanical: every reachable leaf (each `if`/`else` branch inside a clause, resolved down to its own bare call — the same leaves Rewrite 1's `if`/`else`-chain clause bodies produce), with that leaf's clause match, its ordered chain of `if`/`else` conditions (as raw source text, plus whether it's the else-side), the proc it calls, and that call's link-index binds. A wildcarded dimension appears as the literal string `"*"` — a host just skips comparing that one dimension, needing no expression evaluator for it at all; a clause that wildcards both (`processor(*)`/`processor(*, *)`) is reported as `"default": true` instead, never as `row`/`col` both `"*"`.
-
-
-
-```go
-	cols := bilink.NumCols()
-
-	placed par {
-		processor(*, 0) { //
-			place eastOut at link[1].out
-			place eastIn at link[1].in
-			origin(eastOut, eastIn)
-		}
-		processor(*, cols-1) {
-			place westIn at link[3].in
-			place westOut at link[3].out
-			reflect(westIn, westOut)
-		}
-		processor(*, *) {
-			place westIn at link[3].in
-			place eastOut at link[1].out
-			place eastIn at link[1].in
-			place westOut at link[3].out
-			relay(westIn, eastOut, eastIn, westOut)
-		}
-	}
-```
-
-...and `roles/placement.json`, the manifest bilc produces from it (truncated to two leaves — every entry follows the same shape):
-
-```json
-{
-  "transport": "message-channel",
-  "leaves": [
-    {
-      "match": {"row": "0", "col": "*"},
-      "proc": "embedStage",
-      "binds": {"south": "2"}
-    },
-    {
-      "match": {"default": true},
-      "proc": "idle"
-    }
-  ]
-}
-```
-
-Note that `processor(*, *)` collapses to `"default": true` — a host never needs to special-case "wildcards both dimensions" as distinct from "no `processor(...)` matched."
-
----
-
 <a id="example-10"></a>
 
 ### Example 10: Grid placement (mesh ripple)
@@ -880,7 +817,7 @@ Either form takes an optional comma-ok suffix, mirroring Go's own two-value chan
 
 ##### `proc`
 
-An alias for `func` to indicate a code unit that is intended to be run as an independent process - sugar for a `func`, provided for readability rather than semantic necessity, since Bil checks both `proc` and `func` blocks for the same parallel constraints.
+An alias for Go's `func` to indicate a code unit that is intended to be run as an independent process, provided for readability rather than semantic necessity. Bil checks both `proc` and `func` blocks for the same parallel constraints.
 
 ##### `alt`
 
@@ -898,19 +835,65 @@ A `skip {}` block also acts as the default guard for an `alt` - if no channel is
 
 `stop` rewrites to `time.Sleep(1<<63 - 1)` rather than `select{}`, since Go's runtime treats `select{}` as provably permanent and panics if it's ever the last live goroutine; a pending timer isn't, so it can sit there indefinitely without crashing.
 
+---
+
 #### Placement
 
 ##### `placed par`
 
-Like `par`, but its branches are `processor(...)` clauses. `placed par` compiles, per role, to two artifacts: a standalone `roles/<name>/main.go` for every distinct called proc, and `roles/placement.json` — a manifest listing every reachable leaf with its match, the `proc` it calls, and its link-index bindings.
+Like `par`, but its branches are `processor(...)` clauses that specify the `proc` to be run on each processor. A placed `proc` may only take `chan` and compile-time constant parameters. Nesting `placed par` isn't allowed. A given `proc` may be placed-called from at most one clause in the whole block.
 
 ##### `processor`
 
- Specifies a physical processor and must contain exactly one `proc` call. `processor(id)` matches by flat ID; `processor(row, col)` matches by grid position, and either slot may be the literal wildcard `*` (`processor(1, *)` matches every column of row 1; `processor(*, *)` matches every node and must be the block's last clause). The body may be an `if`/`else` chain instead of one bare call, letting a single `processor(...)` dispatch further on another runtime condition. Nesting `placed par` isn't allowed. A given `proc` may be placed-called from at most one clause in the whole block.
+ Specifies a physical processor and must contain exactly one `proc` call. `processor(id)` matches by flat ID; `processor(row, col)` matches by grid position, and either slot may be the literal wildcard `*` (`processor(1, *)` matches every column of row 1; `processor(*, *)` matches every node and must be the block's last clause). The body may be an `if`/`else` chain instead of one bare call, letting a single `processor(...)` dispatch further on another runtime condition.
 
 ##### `place`
 
-Binds one of a placed-called proc's own directional channel parameters to a physical point-to-point link, written at the *call site*: `place eastOut at link[1].out; controller(eastOut)`. A placed-called `proc` may only take `chan` and compile-time constant parameters. Every channel parameter must be bound by exactly one `place` statement, and must be declared with an explicit direction (e.g. `proc controller(eastOut chan<- int)`).
+Binds one of a placed-called proc's own directional channel parameters to a physical point-to-point link, written at the *call site*: `place eastOut at link[1].out; controller(eastOut)`. Every channel parameter must be bound by exactly one `place` statement, and must be declared with an explicit direction (e.g. `proc controller(eastOut chan<- int)`).
+
+##### what `bilc` does with placement
+
+A `.bil` source file expresses placement with two constructs: a `placed par { processor(...) {...} ... processor(*, *) {...} }` block naming which role runs where, and `place NAME at link[EXPR].in`/`.out` statements in the calling clause binding one of that role's own declared channel parameters to a physical link. `bilc`'s action on these two constructs is two rewrites, a set of structural requirements it enforces around them, and two generated artifacts.
+
+**Rewrite 1 — `placed par` becomes a runtime switch.** Each `processor(id)` clause becomes `case bilink.ID() == id:`; each `processor(r, c)` clause becomes `case bilink.Row() == r && bilink.Col() == c:`. Either slot of the two-arg form may instead be a literal `*` wildcard: `processor(1, *)` matches every column of row 1 and compiles to just `case bilink.Row() == 1:` (only the pinned dimension is compared); `processor(*, 0)` matches every row's column 0 and compiles to `case bilink.Col() == 0:`. A clause that wildcards both dimensions — `processor(*)` or `processor(*, *)` — matches every node and compiles to Go's own `default:`, and must be the block's last clause, since nothing after it could ever be reached (the fully-wild clause always runs last regardless of where it's written, exactly like Go's own `default:`, so a later clause after it could never be reached). A clause's body may itself be an `if`/`else` chain rather than one bare call — each branch (recursively) either another `if`/`else` or a `place`-decls-then-one-call leaf — letting one `processor(...)` clause dispatch further by some other runtime condition (`bilink.Row() == 0`, say). The result is one ordinary `switch {}` in the compiled program — never a `par(...)`, never goroutines. Every node's Worker runs the exact same compiled program; which branch a given node takes depends entirely on `bilink.Row()/Col()/ID()`.
+
+**Rewrite 2 — `place NAME at link[EXPR].in`/`.out` becomes nothing at all.** It's compile-time-only, and it lives at the *call site*, not inside the called proc's own body: a `proc` declares ordinary directional Go channel parameters (`eastOut chan<- int32`), and the `processor(...)` clause that calls it writes `place eastOut at link[1].out; controller(eastOut)` to bind that parameter. Every reference to `eastOut` inside `controller`'s own body is rewritten straight to the equivalent `bilink.Send`/`Recv` call on link 1 — the Go channel value is never actually touched — so the call site itself passes a bare `nil` for that argument (`controller(nil)`), just enough to satisfy Go's own type-checker. The `.in`/`.out` suffix is documentation only: it says which half of the physical link this name is for, right next to the index itself, rather than leaving a reader to infer direction solely from which of the callee's two parameters this name happens to be passed to. `bilc` parses and discards it — it's never cross-checked against the callee's declared parameter direction, since a real check would just be re-deriving what that parameter's own type already guarantees at compile time via Go's own type-checker.
+
+**Artifact 1 — one standalone Go source per role.** `RoleBinaries` emits `roles/<name>/main.go` for every distinct proc a `placed par` block calls — the whole file, unchanged, compiles to a single hardcoded call to just that one role instead of the switch. Every other declaration is still emitted exactly as normal; Go's own linker, not `bilc`, eliminates whatever dead code is not reachable from that one call. _Each binary only contains relevant code for that processor._
+
+**Artifact 2 — `roles/placement.json` manifest.** Every reachable leaf with that leaf's clause match, its ordered chain of `if`/`else` conditions, the `proc` it calls, and that call's link-index binds. That allows the loader to target topologies without prior knowledge of the size of the processor network. 
+
+```go
+ placed par {
+      processor(*, *) {
+          if r == 0 {
+              head()
+          } else {
+              idle()
+          }                                                                                                                         
+      }
+  }
+```
+
+```json
+{
+	"transport": "message-channel",
+	"leaves": [
+		{
+		"match": { "default": true },
+		"conditions": [{ "expr": "r == 0", "negate": false }],
+		"proc": "head"
+		},
+		{
+		"match": { "default": true },
+		"conditions": [{ "expr": "r == 0", "negate": true }],
+		"proc": "idle"
+		}
+	]
+}
+```
+
+---
 
 #### Helpers
 
