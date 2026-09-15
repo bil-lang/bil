@@ -841,7 +841,7 @@ A `skip {}` block also acts as the default guard for an `alt` - if no channel is
 
 ##### `placed par`
 
-Like `par`, but its branches are `processor(...)` clauses that specify the `proc` to be run on each processor. A placed `proc` may only take `chan` and compile-time constant parameters. Nesting `placed par` isn't allowed. A given `proc` may be placed-called from at most one clause in the whole block.
+Like `par`, but its branches are `processor(...)` clauses that specify the `proc` to be run on each processor. A placed `proc` may only take `chan` and compile-time constant parameters. Nesting `placed par` isn't allowed. A given `proc` may be placed-called from at most one clause in the whole block. Where `var`s are declared in an outer scope, they must be read-only in all branches. `timer`s may be declared in an outer scope and used in multiple branches, but they will not be synchronised across branches.
 
 ##### `processor`
 
@@ -851,7 +851,7 @@ Like `par`, but its branches are `processor(...)` clauses that specify the `proc
 
 Binds one of a placed-called proc's own directional channel parameters to a physical point-to-point link, written at the *call site*: `place eastOut at link[1].out; controller(eastOut)`. Every channel parameter must be bound by exactly one `place` statement, and must be declared with an explicit direction (e.g. `proc controller(eastOut chan<- int)`).
 
-##### what `bilc` does with placement
+##### what `bilc` does with placement...
 
 A `.bil` source file expresses placement with two constructs: a `placed par { processor(...) {...} ... processor(*, *) {...} }` block naming which role runs where, and `place NAME at link[EXPR].in`/`.out` statements in the calling clause binding one of that role's own declared channel parameters to a physical link. `bilc`'s action on these two constructs is two rewrites, a set of structural requirements it enforces around them, and two generated artifacts.
 
@@ -861,7 +861,7 @@ A `.bil` source file expresses placement with two constructs: a `placed par { pr
 
 **Artifact 1 — one standalone Go source per role.** `RoleBinaries` emits `roles/<name>/main.go` for every distinct proc a `placed par` block calls — the whole file, unchanged, compiles to a single hardcoded call to just that one role instead of the switch. Every other declaration is still emitted exactly as normal; Go's own linker, not `bilc`, eliminates whatever dead code is not reachable from that one call. _Each binary only contains relevant code for that processor._
 
-**Artifact 2 — `roles/placement.json` manifest.** Every reachable leaf with that leaf's clause match, its ordered chain of `if`/`else` conditions, the `proc` it calls, and that call's link-index binds. That allows the loader to target topologies without prior knowledge of the size of the processor network. 
+**Artifact 2 — `roles/placement.json` manifest.** Every reachable leaf with that leaf's clause match, its ordered chain of `if`/`else` conditions, the `proc` it calls, and that call's link-index binds. That allows the loader to target topologies without prior knowledge of the size of the processor network. The `tools/placement2svg/placement2svg.py` script is provided to make pretty pictures.
 
 ```go
  placed par {
@@ -988,7 +988,7 @@ Six checks are done:
 
 ##### placed par
 
-- Each branch takes one `proc`. Every channel parameter of the `proc` must be explicitly directional (`<-chan T`/`chan<- T`) and bound with a `place` statement; every non-channel parameter must be a compile-time constant; a `proc` may be placed-called from at most one clause in a `placed par`; no nesting.
+- Each branch takes one placed `proc`. Every channel parameter of the `proc` must be explicitly directional (`<-chan T`/`chan<- T`) and bound with a `place` statement; every non-channel parameter must be a compile-time constant. Nesting `placed par` statements isn't allowed. A given `proc` may be placed-called from at most one clause in the whole block. Where `var`s are declared in an outer scope, they must be read-only in all branches.
 
 [^^](#top)
 
