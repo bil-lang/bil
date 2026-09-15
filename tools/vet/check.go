@@ -80,6 +80,32 @@ func analyzeFileWithModule(fset *token.FileSet, path string, extraGoMod []string
 		return nil, nil, nil, err
 	}
 
+	return loadOneFilePackage(fset, dir)
+}
+
+// analyzeFileInPlace is analyzeFile, but without any of its staging: it
+// points go/packages directly at path's own directory, trusting the
+// caller that doing so is actually safe -- that directory must already
+// resolve everything path imports via a real go.mod somewhere above it
+// (not one this package generates), and must not contain any other,
+// unrelated .go file that would become part of the same package by
+// accident. tools/bil's `bil emu` uses this for a placed program's
+// per-role scratch directory (emulatorDir/nodeprog/bilemu-*/roles/<role>/):
+// each holds exactly one file, and already sits inside the real emulator
+// module, so emulator/bilink resolves there via the module's own
+// ordinary self-import -- copying it elsewhere first, the way
+// analyzeFileWithModule does, would only throw that away.
+func analyzeFileInPlace(fset *token.FileSet, path string) (file *ast.File, info *types.Info, typeErrs []error, err error) {
+	return loadOneFilePackage(fset, filepath.Dir(path))
+}
+
+// loadOneFilePackage is analyzeFile{WithModule,InPlace}'s shared tail:
+// load dir as a single Go package via go/packages and pull out its lone
+// file's syntax tree, type info, and any errors -- dir must already
+// resolve to exactly one Go file, one way or another (analyzeFileWithModule
+// arranges that by construction; analyzeFileInPlace trusts its caller to
+// have arranged it).
+func loadOneFilePackage(fset *token.FileSet, dir string) (file *ast.File, info *types.Info, typeErrs []error, err error) {
 	cfg := &packages.Config{
 		Mode: packages.LoadAllSyntax,
 		Dir:  dir,
@@ -122,11 +148,36 @@ func Check(path string, extraGoMod ...string) (messages []string, err error) {
 	if err != nil {
 		return nil, err
 	}
+	return runChecks(fset, file, info, typeErrs), nil
+}
+
+// CheckInPlace is Check, but for a file whose own directory already
+// resolves everything it imports via a real go.mod somewhere above it
+// (see analyzeFileInPlace's own doc comment for the exact contract) --
+// `bil emu` uses this for a placed program's per-role scratch
+// directories, which already sit inside the real emulator module and so
+// need no generated go.mod/replace the way Check's bare-temp-file
+// callers do.
+func CheckInPlace(path string) (messages []string, err error) {
+	fset := token.NewFileSet()
+	file, info, typeErrs, err := analyzeFileInPlace(fset, path)
+	if err != nil {
+		return nil, err
+	}
+	return runChecks(fset, file, info, typeErrs), nil
+}
+
+// runChecks is Check/CheckInPlace's shared tail once a file's syntax
+// tree and type info are in hand: report any type errors as messages
+// (a program that doesn't even type-check has nothing further worth
+// checking), otherwise run all six Bil usage checks and format their
+// findings into the same ready-to-print message shape.
+func runChecks(fset *token.FileSet, file *ast.File, info *types.Info, typeErrs []error) (messages []string) {
 	if len(typeErrs) > 0 {
 		for _, e := range typeErrs {
 			messages = append(messages, e.Error())
 		}
-		return messages, nil
+		return messages
 	}
 
 	conflicts, closeSendConflicts := CheckChannelUsage(info, file)
@@ -192,5 +243,5 @@ func Check(path string, extraGoMod ...string) (messages []string, err error) {
 			fset.Position(av.Pos),
 		))
 	}
-	return messages, nil
+	return messages
 }

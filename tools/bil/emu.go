@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"syscall"
 
 	"bilc"
@@ -91,17 +92,17 @@ func emuCmd(src, target string, rows, cols int, addr string, openBrowser bool, s
 		return 1
 	}
 
-	// vet.Check can only ever run on a program with no link[...]/placed
-	// par usage: its importer (go/importer's "source" mode, see
-	// tools/vet/check.go) does classic GOPATH-style resolution with no
-	// real Go-modules awareness, so it can never resolve
-	// "emulator/bilink" -- not a location problem, moving the file
-	// doesn't help. This is the exact same, already-accepted limitation
-	// `bil vet`/`bil run` have always had on these programs (confirmed
-	// directly: `bil vet` on a link/placed-par example fails identically)
-	// -- the emulator's own `go build` step (module-aware, unlike vet's
-	// importer) is what actually verifies these programs, same as it
-	// always has, for either backend.
+	// A non-placed program has no emulator/bilink import to resolve at
+	// all, so it's checked here, immediately, exactly like runCmd's own
+	// execute=true path -- refusing to proceed on any violation before
+	// ever touching the emulator checkout. A placed/link program is
+	// checked further down instead, once its role sources are written
+	// (see the vet.Check loop after they're split out): each role's own
+	// scratch directory already lives inside the real emulator module
+	// (nested under emulatorDir/nodeprog), so emulator/bilink resolves
+	// there via the module's own ordinary self-import -- no generated
+	// go.mod/replace needed the way runCmd needs one for its own,
+	// unrelated bare temp file.
 	if roles == nil {
 		tmp, err := os.CreateTemp("", "bil-emu-*.go")
 		if err != nil {
@@ -193,6 +194,37 @@ func emuCmd(src, target string, rows, cols int, addr string, openBrowser bool, s
 		}
 		if err := os.WriteFile(filepath.Join(scratchDir, "roles", "placement.json"), manifest, 0o644); err != nil {
 			fmt.Fprintln(stderr, err)
+			return 1
+		}
+
+		// Every role's own scratch directory (written just above) already
+		// sits inside the real emulator module and holds exactly one
+		// file, so vet.CheckInPlace -- unlike Check -- needs no generated
+		// go.mod/replace and no staging elsewhere: it resolves
+		// emulator/bilink straight from where the file already is. See
+		// this function's own doc comment on the roles == nil branch
+		// above for why that's different from runCmd's bare-temp-file
+		// case. Sorted for deterministic message ordering across runs.
+		roleNames := make([]string, 0, len(roles))
+		for role := range roles {
+			roleNames = append(roleNames, role)
+		}
+		sort.Strings(roleNames)
+		var anyViolations bool
+		for _, role := range roleNames {
+			roleMain := filepath.Join(scratchDir, "roles", role, "main.go")
+			messages, err := vet.CheckInPlace(roleMain)
+			if err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			for _, m := range messages {
+				fmt.Fprintln(stderr, m)
+				anyViolations = true
+			}
+		}
+		if anyViolations {
+			fmt.Fprintf(stderr, "\nbil: static analysis failed for %s — not running (see violation(s) above)\n", src)
 			return 1
 		}
 	}
