@@ -28,7 +28,7 @@
 // to a physical link. The `.in`/`.out` suffix says which half of that
 // link this is, right next to the index itself, purely for a reader's
 // sake -- link[1] is east and link[3] is west below (a convention
-// owned by the emulator's topology layer, ../../emulator/static/index.html's
+// owned by the emulator's topology layer, ../../emulator/cmd/wasm/static/index.html's
 // buildTopology, not by bilc or bilink; a different topology would
 // number its links differently), so `link[1].out` reads as "send
 // east" and `link[3].in` as "receive from west" without needing to

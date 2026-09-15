@@ -13,7 +13,7 @@ func TestInferGridSizeNoPlacement(t *testing.T) {
 }
 
 // TestInferGridSizePlacedController mirrors examples/20-placed-controller.bil's
-// actual deploy.json shape: controller at (0,0), rowEnd at (0,cols-1), relay
+// actual placement.json shape: controller at (0,0), rowEnd at (0,cols-1), relay
 // wildcarding the rest of row 0, idle wildcarding everything else. The
 // 6x7 default is collision-free (controller and rowEnd land on distinct
 // cells at cols=7), so it should be preferred over any smaller size.

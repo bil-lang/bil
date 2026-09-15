@@ -29,10 +29,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Per-role standalone binaries and the host-facing deploy manifest --
+	// Per-role standalone binaries and the host-facing placement manifest --
 	// see this feature's plan (link-native boot cascade): a placed-par
 	// program also gets one complete, standalone Go source per distinct
-	// role under roles/<name>/main.go, plus roles/deploy.json describing
+	// role under roles/<name>/main.go, plus roles/placement.json describing
 	// every reachable leaf's clause match, if/else condition chain, and
 	// link-index binds for a host to resolve concrete role assignment at
 	// grid-launch time. Both are nil/empty for a file with no placed par
@@ -56,13 +56,13 @@ func main() {
 			}
 		}
 
-		deploy, err := bilc.DeployManifest(os.Args[1], src)
+		placement, err := bilc.PlacementManifest(os.Args[1], src)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "deploy manifest error:", err)
+			fmt.Fprintln(os.Stderr, "placement manifest error:", err)
 			os.Exit(1)
 		}
-		if deploy != nil {
-			if err := os.WriteFile(filepath.Join(outDir, "roles", "deploy.json"), deploy, 0o644); err != nil {
+		if placement != nil {
+			if err := os.WriteFile(filepath.Join(outDir, "roles", "placement.json"), placement, 0o644); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}

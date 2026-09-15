@@ -1937,7 +1937,7 @@ func (t *transformer) collectFuncBodyRanges() (ranges []funcBodyRange) {
 }
 
 // buildFuncBodyIndex populates t.funcBodyByName from collectFuncBodyRanges
-// -- run once, early, by Transform, DeployManifest, and RoleBinaries alike,
+// -- run once, early, by Transform, PlacementManifest, and RoleBinaries alike,
 // before anything that needs to look up a placed-called proc's parameter
 // list or body range by name.
 func (t *transformer) buildFuncBodyIndex() {
@@ -2934,7 +2934,7 @@ func (t *transformer) emitPlacedCallLeaf(out *bytes.Buffer, lo, hi int) {
 // (matching how placedClause's own rowExpr/colExpr already capture
 // expressions as text rather than a parsed AST) rather than any bilc
 // internal representation, since the only consumer is a host runtime
-// outside this file entirely (see DeployManifest) -- negate is true
+// outside this file entirely (see PlacementManifest) -- negate is true
 // when this leaf is reached via that condition's `else` side.
 type leafCondition struct {
 	exprSrc string
@@ -2949,7 +2949,7 @@ type leafCondition struct {
 // site's local place-decl names). Collected by collectResolvedLeaves
 // for two independent consumers: RoleBinaries (which additionally needs
 // each leaf's own [lo,hi) token range, to reuse emitPlacedCallLeaf
-// verbatim) and DeployManifest (which needs everything else, so a host
+// verbatim) and PlacementManifest (which needs everything else, so a host
 // can resolve concrete role assignment at grid-launch time without
 // needing bilc's own parser).
 type resolvedLeaf struct {
@@ -2966,7 +2966,7 @@ type resolvedLeaf struct {
 // with no placed par at all. (v1 doesn't support more than one such
 // block per file in practice -- the construct is a standalone statement,
 // not nestable, so a file with more than one is unusual enough not to
-// need DeployManifest/RoleBinaries to anticipate it yet -- so "first"
+// need PlacementManifest/RoleBinaries to anticipate it yet -- so "first"
 // and "only" coincide for every real file today.)
 func (t *transformer) findPlacedParBlock() (lo, hi int, found bool) {
 	for i := 0; i+2 < len(t.toks); i++ {
@@ -3684,12 +3684,12 @@ func (t *transformer) checkNoBufferedChannels() error {
 	return nil
 }
 
-// DeployManifest builds the JSON deployment manifest a host needs to
+// PlacementManifest builds the JSON placement manifest a host needs to
 // resolve concrete per-node role assignment at grid-launch time -- the
 // only manifest bilc produces (an earlier `.topology.yaml` sibling,
 // deliberately incomplete for human reading, was dropped: it duplicated
 // this one's information with a weaker completeness guarantee, and
-// `tools/topology2svg` now renders straight from `roles/deploy.json`
+// `tools/placement2svg` now renders straight from `roles/placement.json`
 // instead). This one is a complete, mechanical description of every
 // reachable placed-par leaf,
 // meant only for a program to consume, never a person to read. Each
@@ -3711,7 +3711,7 @@ func (t *transformer) checkNoBufferedChannels() error {
 // as Row/Col "*","*" -- see isFullyWild -- so a host never needs to
 // special-case "*" against Default, only against a real expression in
 // the other slot.
-func DeployManifest(filename string, src []byte) ([]byte, error) {
+func PlacementManifest(filename string, src []byte) ([]byte, error) {
 	if abs, err := filepath.Abs(filename); err == nil {
 		filename = abs
 	}
@@ -3796,7 +3796,7 @@ func Transform(filename string, src []byte) ([]byte, error) {
 // relying on Go's own linker to drop what isn't reachable, is both
 // simpler and more robust than bilc slicing out one role's own
 // dependency closure by hand). Returns (nil, nil) for a file with no
-// placed par at all, mirroring DeployManifest's own convention.
+// placed par at all, mirroring PlacementManifest's own convention.
 func RoleBinaries(filename string, src []byte) (map[string][]byte, error) {
 	if abs, err := filepath.Abs(filename); err == nil {
 		filename = abs

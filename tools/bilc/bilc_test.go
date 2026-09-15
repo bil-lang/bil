@@ -1090,11 +1090,11 @@ func main() {
 	}
 }
 
-// TestDeployManifest checks the JSON deployment manifest's shape: each
+// TestPlacementManifest checks the JSON placement manifest's shape: each
 // leaf's clause match, its ordered if/else condition chain (with
 // negate set for the else side), the resolved proc, and its link-index
 // binds keyed by the callee's own declared parameter names.
-func TestDeployManifest(t *testing.T) {
+func TestPlacementManifest(t *testing.T) {
 	src := []byte(`package main
 
 proc controller(toEast chan<- int32) {
@@ -1134,9 +1134,9 @@ func main() {
 	}
 }
 `)
-	m, err := DeployManifest("test.bil", src)
+	m, err := PlacementManifest("test.bil", src)
 	if err != nil {
-		t.Fatalf("DeployManifest: %v", err)
+		t.Fatalf("PlacementManifest: %v", err)
 	}
 	got := string(m)
 	for _, want := range []string{
@@ -1156,7 +1156,7 @@ func main() {
 		`"proc": "idle"`,
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("expected %q in deploy manifest, got:\n%s", want, got)
+			t.Errorf("expected %q in placement manifest, got:\n%s", want, got)
 		}
 	}
 
@@ -1166,9 +1166,9 @@ func main() {
 	println("hello")
 }
 `)
-	m2, err := DeployManifest("test.bil", noPlacement)
+	m2, err := PlacementManifest("test.bil", noPlacement)
 	if err != nil {
-		t.Fatalf("DeployManifest (no placed par): %v", err)
+		t.Fatalf("PlacementManifest (no placed par): %v", err)
 	}
 	if m2 != nil {
 		t.Errorf("expected nil manifest for a file with no placed par block, got:\n%s", m2)
@@ -1177,7 +1177,7 @@ func main() {
 
 // TestPlacedParWildcard exercises `processor(...)`'s wildcard forms
 // across all three consumers that parse a placed-par block: Transform's
-// switch codegen, DeployManifest's JSON, and RoleBinaries' per-role Go.
+// switch codegen, PlacementManifest's JSON, and RoleBinaries' per-role Go.
 // The fixture uses `processor(1, *)` (row pinned, column wild) and
 // `processor(*, *)` (fully wild, replacing an explicit `default`) side
 // by side with an ordinary exact-node clause, so each consumer's
@@ -1232,9 +1232,9 @@ func main() {
 		t.Errorf("expected the wildcard sentinel to never reach a comparison, got:\n%s", got)
 	}
 
-	dm, err := DeployManifest("test.bil", src)
+	dm, err := PlacementManifest("test.bil", src)
 	if err != nil {
-		t.Fatalf("DeployManifest: %v", err)
+		t.Fatalf("PlacementManifest: %v", err)
 	}
 	gotDM := string(dm)
 	for _, want := range []string{
@@ -1247,7 +1247,7 @@ func main() {
 		`"proc": "idle"`,
 	} {
 		if !strings.Contains(gotDM, want) {
-			t.Errorf("expected %q in deploy manifest, got:\n%s", want, gotDM)
+			t.Errorf("expected %q in placement manifest, got:\n%s", want, gotDM)
 		}
 	}
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Render a bilc `roles/deploy.json` deployment manifest as an SVG diagram.
+"""Render a bilc `roles/placement.json` placement manifest as an SVG diagram.
 
-`deploy.json` (`DeployManifest` in tools/bilc/bilc.go; see docs/guide.md,
+`placement.json` (`PlacementManifest` in tools/bilc/bilc.go; see docs/guide.md,
 "What bilc does with placement") is the *only* placement manifest bilc
 produces -- a JSON list of leaves, each with a clause match (an id, a
 row/col pair -- either slot possibly the literal wildcard string "*" --
@@ -12,13 +12,13 @@ that call's link-index binds. It's mechanical and complete by design
 host, resolves every cell by walking the leaves in order and evaluating
 each one's match plus condition chain -- first leaf that matches wins,
 mirroring switch/if-else "first match wins" semantics and the
-`resolveRole`/`evalExpr` functions in ../../emulator/static/index.html,
+`resolveRole`/`evalExpr` functions in ../../emulator/cmd/wasm/static/index.html,
 which this deliberately stays in lockstep with (same tiny expression
 grammar: identifiers, int literals, ==, !=, &&, +, -, and the same "*"
 wildcard-dimension convention) so the diagram always matches what the
 real boot cascade would actually run.
 
-Since deploy.json never records a concrete grid/id-space size (bilc
+Since placement.json never records a concrete grid/id-space size (bilc
 never knows one at compile time), --rows/--cols/--ids pick an
 illustrative size to render.
 """
@@ -45,12 +45,12 @@ class EvalError(ValueError):
 
 
 def eval_expr(src, env):
-    """Evaluate one deploy.json expression against env (r/c/rows/cols).
+    """Evaluate one placement.json expression against env (r/c/rows/cols).
 
     Hand-rolled, not eval()/Function()-based, deliberately: this mirrors
-    evalExpr in ../../emulator/static/index.html exactly (identifiers,
+    evalExpr in ../../emulator/cmd/wasm/static/index.html exactly (identifiers,
     int literals, ==, !=, &&, +, -) rather than accepting arbitrary
-    Python syntax, so this tool's notion of "what deploy.json expressions
+    Python syntax, so this tool's notion of "what placement.json expressions
     mean" can never drift ahead of what the real host actually implements.
     """
     i = 0
@@ -311,7 +311,7 @@ def escape(s):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("manifest", type=Path, help="path to a roles/deploy.json file")
+    ap.add_argument("manifest", type=Path, help="path to a roles/placement.json file")
     ap.add_argument("-o", "--out", type=Path, help="output .svg path (default: alongside input)")
     ap.add_argument("--rows", type=int, default=1, help="rows to render for a row/col grid (default: 1, auto-grown to fit explicit row matches)")
     ap.add_argument("--cols", type=int, default=6, help="cols to render for a row/col grid (default: 6)")
@@ -332,7 +332,7 @@ def main():
         if isinstance(m.get("col"), str) and m["col"] != WILDCARD and m["col"].lstrip("-").isdigit():
             cols = max(cols, int(m["col"]) + 1)
 
-    # deploy.json always lives at nodeprog/<demo>/roles/deploy.json -- the
+    # placement.json always lives at nodeprog/<demo>/roles/placement.json -- the
     # demo name one level up is a far more useful title than "roles".
     parent = args.manifest.parent
     title = parent.parent.name if parent.name == "roles" and parent.parent.name else parent.name or args.manifest.name

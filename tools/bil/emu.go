@@ -57,7 +57,7 @@ func emuMain(args []string, stdout, stderr io.Writer) int {
 
 // emuCmd transpiles src with bilc, vets it (refusing to proceed on any
 // violation, exactly like runCmd's execute=true path), detects placement
-// via bilc.RoleBinaries/DeployManifest, and hands the built role sources
+// via bilc.RoleBinaries/PlacementManifest, and hands the built role sources
 // to one of two execution backends at a sibling ../emulator checkout
 // (see emulator/README.md's Install section for that convention, which
 // this reuses rather than inventing an env var or config override):
@@ -136,9 +136,9 @@ func emuCmd(src, target string, rows, cols int, addr string, openBrowser bool, s
 		if roles == nil {
 			rows, cols = 1, 1
 		} else {
-			manifest, err := bilc.DeployManifest(src, in)
+			manifest, err := bilc.PlacementManifest(src, in)
 			if err != nil {
-				fmt.Fprintln(stderr, "deploy manifest error:", err)
+				fmt.Fprintln(stderr, "placement manifest error:", err)
 				return 1
 			}
 			inferredRows, inferredCols, err := inferGridSize(manifest)
@@ -158,7 +158,7 @@ func emuCmd(src, target string, rows, cols int, addr string, openBrowser bool, s
 	// scratchDir holds the transpiled role source(s) -- plain Go, not yet
 	// built for any particular target -- exactly the on-disk shape
 	// emulator/README.md's own Quickstart produces by hand
-	// (nodeprog/<name>/main.go, or roles/*/main.go + roles/deploy.json).
+	// (nodeprog/<name>/main.go, or roles/*/main.go + roles/placement.json).
 	// It lives under emulatorDir/nodeprog so it resolves the "emulator"
 	// module's own go.mod, the same reason emulator/README.md's Quickstart
 	// always builds from inside the emulator checkout.
@@ -175,9 +175,9 @@ func emuCmd(src, target string, rows, cols int, addr string, openBrowser bool, s
 			return 1
 		}
 	} else {
-		manifest, err := bilc.DeployManifest(src, in)
+		manifest, err := bilc.PlacementManifest(src, in)
 		if err != nil {
-			fmt.Fprintln(stderr, "deploy manifest error:", err)
+			fmt.Fprintln(stderr, "placement manifest error:", err)
 			return 1
 		}
 		for role, roleSrc := range roles {
@@ -191,7 +191,7 @@ func emuCmd(src, target string, rows, cols int, addr string, openBrowser bool, s
 				return 1
 			}
 		}
-		if err := os.WriteFile(filepath.Join(scratchDir, "roles", "deploy.json"), manifest, 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(scratchDir, "roles", "placement.json"), manifest, 0o644); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
@@ -205,7 +205,7 @@ func emuCmd(src, target string, rows, cols int, addr string, openBrowser bool, s
 
 // runWasmTarget builds scratchDir's role source(s) to WASM, assembles a
 // servable directory (emulator/cmd/wasm's static assets + the built
-// .wasm(es) + roles/deploy.json when placed), and runs
+// .wasm(es) + roles/placement.json when placed), and runs
 // emulator/cmd/wasm to serve it, opening a browser -- this is `bil emu`'s
 // original and, until -target existed, only behavior.
 func runWasmTarget(emulatorDir, scratchDir string, placed bool, src string, rows, cols int, addr string, openBrowser bool, stdout, stderr io.Writer) int {
@@ -249,7 +249,7 @@ func runWasmTarget(emulatorDir, scratchDir string, placed bool, src string, rows
 				return 1
 			}
 		}
-		if err := copyFile(filepath.Join(scratchDir, "roles", "deploy.json"), filepath.Join(rolesDir, "deploy.json")); err != nil {
+		if err := copyFile(filepath.Join(scratchDir, "roles", "placement.json"), filepath.Join(rolesDir, "placement.json")); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}

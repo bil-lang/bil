@@ -8,20 +8,20 @@ import (
 	"go/token"
 )
 
-// deployManifest mirrors bilc.DeployManifest's JSON shape (see
+// placementManifest mirrors bilc.PlacementManifest's JSON shape (see
 // tools/bilc/bilc.go's jsonManifest/jsonLeaf/jsonMatch/jsonCondition) --
 // duplicated here rather than imported, since those types are unexported
 // and the JSON shape is small and stable. Only the fields inferGridSize
 // actually needs are kept.
-type deployManifest struct {
-	Leaves []deployLeaf `json:"leaves"`
+type placementManifest struct {
+	Leaves []placementLeaf `json:"leaves"`
 }
 
-type deployLeaf struct {
-	Match deployMatch `json:"match"`
+type placementLeaf struct {
+	Match placementMatch `json:"match"`
 }
 
-type deployMatch struct {
+type placementMatch struct {
 	ID      string `json:"id,omitempty"`
 	Row     string `json:"row,omitempty"`
 	Col     string `json:"col,omitempty"`
@@ -46,7 +46,7 @@ type rcLeaf struct {
 type concreteID struct{ idExpr string }
 
 // inferGridSize computes the smallest rows x cols grid at which every
-// explicit leaf in a DeployManifest is unambiguously reachable -- see the
+// explicit leaf in a PlacementManifest is unambiguously reachable -- see the
 // emu command's design notes for why this is computed rather than
 // guessed or required as a flag.
 //
@@ -69,9 +69,9 @@ type concreteID struct{ idExpr string }
 // match/id expression fails to parse/evaluate -- both should be
 // unreachable for any real bilc-generated manifest.
 func inferGridSize(manifest []byte) (rows, cols int, err error) {
-	var dm deployManifest
+	var dm placementManifest
 	if err := json.Unmarshal(manifest, &dm); err != nil {
-		return 0, 0, fmt.Errorf("parsing deploy manifest: %w", err)
+		return 0, 0, fmt.Errorf("parsing placement manifest: %w", err)
 	}
 
 	var byRC []rcLeaf
