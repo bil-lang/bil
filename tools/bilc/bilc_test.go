@@ -507,6 +507,496 @@ func main() {
 	}
 }
 
+// TestPlacedChanStructPayload checks that a placed channel typed as a
+// plain struct (mirroring examples/05-protocol.bil's Point) gets
+// expanded into one bilink.Send/Recv per field, in declaration order,
+// wrapped in a scoped block -- not the single-word bilink.Send/Recv a
+// plain int32 payload still gets untouched.
+func TestPlacedChanStructPayload(t *testing.T) {
+	src := []byte(`package main
+
+type Point struct {
+	X, Y int
+}
+
+proc node(in <-chan Point, out chan<- Point) {
+	var p Point
+	in -> p
+	out <- p
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1].in
+			place out2 at link[1].out
+			node(in2, out2)
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"p.X = int(bilink.Recv(1))",
+		"p.Y = int(bilink.Recv(1))",
+		"bilSendVal := (p)",
+		"bilink.Send(1, int32(bilSendVal.X))",
+		"bilink.Send(1, int32(bilSendVal.Y))",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, got)
+		}
+	}
+	// A plain int32 payload elsewhere in the same file must still get
+	// the original, single-word codegen -- this feature must not
+	// change behavior for the common case.
+	if strings.Contains(got, "int32(bilink.Recv") {
+		t.Errorf("an int32 leaf must decode via a bare bilink.Recv call, not a redundant int32(...) wrap, got:\n%s", got)
+	}
+}
+
+// TestPlacedChanNestedStructAndArrayPayload exercises a struct field that's
+// itself another named struct, and a fixed-size array of that struct --
+// both should flatten into one leaf per primitive component, addressed by
+// a plain dotted/indexed Go selector built directly off the whole value,
+// with no nested composite literal required.
+func TestPlacedChanNestedStructAndArrayPayload(t *testing.T) {
+	src := []byte(`package main
+
+type Inner struct {
+	A, B int
+}
+
+type Outer struct {
+	Inner Inner
+	C     int
+}
+
+proc node(in <-chan [2]Outer) {
+	var v [2]Outer
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"v[0].Inner.A = int(bilink.Recv(1))",
+		"v[0].Inner.B = int(bilink.Recv(1))",
+		"v[0].C = int(bilink.Recv(1))",
+		"v[1].Inner.A = int(bilink.Recv(1))",
+		"v[1].Inner.B = int(bilink.Recv(1))",
+		"v[1].C = int(bilink.Recv(1))",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, got)
+		}
+	}
+}
+
+// TestPlacedChanBoolFloatPayload checks bool (0/1-encoded via the
+// injected bilBoolWord/bilWordBool helpers) and float64 (bit-packed via
+// math.Float32bits/Float32frombits, the same convention
+// 22-pipeline-transformer.bil already established by hand), and that
+// their helper/import get injected only because this file actually uses
+// them.
+func TestPlacedChanBoolFloatPayload(t *testing.T) {
+	src := []byte(`package main
+
+type Reading struct {
+	Ok    bool
+	Value float64
+}
+
+proc node(in <-chan Reading, out chan<- Reading) {
+	var r Reading
+	in -> r
+	out <- r
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1].in
+			place out2 at link[1].out
+			node(in2, out2)
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"r.Ok = bilWordBool(bilink.Recv(1))",
+		"r.Value = float64(math.Float32frombits(uint32(bilink.Recv(1))))",
+		"bilink.Send(1, bilBoolWord(bilSendVal.Ok))",
+		"bilink.Send(1, int32(math.Float32bits(float32(bilSendVal.Value))))",
+		"func bilBoolWord(b bool) int32",
+		"func bilWordBool(w int32) bool",
+		`import "math"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, got)
+		}
+	}
+}
+
+// TestPlacedChanBarePrimitivePayload checks a placed channel whose element
+// type is a bare primitive (no wrapping struct at all) -- the empty
+// access-path case, exercising float64 directly.
+func TestPlacedChanBarePrimitivePayload(t *testing.T) {
+	src := []byte(`package main
+
+proc node(in <-chan float64, out chan<- float64) {
+	var v float64
+	in -> v
+	out <- v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1].in
+			place out2 at link[1].out
+			node(in2, out2)
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"v = float64(math.Float32frombits(uint32(bilink.Recv(1))))",
+		"bilink.Send(1, int32(math.Float32bits(float32(bilSendVal))))",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, got)
+		}
+	}
+}
+
+// TestPlacedChanUnsupportedFieldType, TestPlacedChanSlicePayload, and
+// TestPlacedChanSelfReferentialPayload confirm the shapes this feature
+// deliberately doesn't support are rejected with a clear error at
+// Transform() time (during collectPlacedCallSites's validation pass),
+// never silently miscompiled or deferred to a confusing Go compiler
+// error the way an unresolvable placed channel type used to be.
+func TestPlacedChanUnsupportedFieldType(t *testing.T) {
+	src := []byte(`package main
+
+type Msg struct {
+	Text string
+}
+
+proc node(in <-chan Msg) {
+	var v Msg
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error for a string field, got none")
+	}
+	if !strings.Contains(err.Error(), "not one of the supported") {
+		t.Errorf("error = %q, want it to explain the field's type isn't supported", err.Error())
+	}
+}
+
+func TestPlacedChanSlicePayload(t *testing.T) {
+	src := []byte(`package main
+
+proc node(in <-chan []int32) {
+	var v []int32
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error for a slice payload type, got none")
+	}
+	if !strings.Contains(err.Error(), "slice") {
+		t.Errorf("error = %q, want it to call out that it's a slice", err.Error())
+	}
+}
+
+func TestPlacedChanSelfReferentialPayload(t *testing.T) {
+	src := []byte(`package main
+
+type Node struct {
+	Next Node
+}
+
+proc node(in <-chan Node) {
+	var v Node
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error for a self-referential struct, got none")
+	}
+	if !strings.Contains(err.Error(), "self-referential") {
+		t.Errorf("error = %q, want it to call out the self-reference", err.Error())
+	}
+}
+
+// TestPlacedChanTaggedUnionPayload exercises Milestone 2: a placed
+// channel whose element type is a tagged union (a marker-method interface,
+// Example 5's own isLogMsg()-shaped idiom) rather than a plain
+// struct/array. Every implementing variant in the file becomes one `case`
+// in a generated switch, tagged by its declaration order; sending type-
+// switches on the dynamic value, receiving switches on the wire tag and
+// builds each variant via the same piecewise leaf assignment a plain
+// struct payload already uses, then assigns the finished concrete value to
+// the interface-typed target.
+func TestPlacedChanTaggedUnionPayload(t *testing.T) {
+	src := []byte(`package main
+
+type LogMsg interface {
+	isLogMsg()
+}
+
+type Info struct {
+	Code int
+}
+
+func (Info) isLogMsg() {}
+
+type Warn struct {
+	Code int
+}
+
+func (Warn) isLogMsg() {}
+
+proc node(in <-chan LogMsg, out chan<- LogMsg) {
+	var v LogMsg
+	in -> v
+	out <- v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1].in
+			place out2 at link[1].out
+			node(in2, out2)
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"switch bilink.Recv(1) {",
+		"case 0:",
+		"var bilRecvVal Info",
+		"bilRecvVal.Code = int(bilink.Recv(1))",
+		"v = bilRecvVal",
+		"case 1:",
+		"var bilRecvVal Warn",
+		`panic("bilink: unrecognized LogMsg tag")`,
+		"switch bilSendVal := LogMsg((v)).(type) {",
+		"case Info:",
+		"bilink.Send(1, 0)",
+		"bilink.Send(1, int32(bilSendVal.Code))",
+		"case Warn:",
+		"bilink.Send(1, 1)",
+		`panic("bilink: unrecognized LogMsg variant")`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, got)
+		}
+	}
+}
+
+// TestPlacedChanTaggedUnionWrongMethodCount, ...MethodHasParams, and
+// ...NoVariants confirm the interface shapes this feature deliberately
+// doesn't support are rejected with a clear error, the same "reject,
+// don't try to prove it's fine" stance the struct/array shapes already
+// get (TestPlacedChanUnsupportedFieldType et al above).
+func TestPlacedChanTaggedUnionWrongMethodCount(t *testing.T) {
+	src := []byte(`package main
+
+type Proto interface {
+	A()
+	B()
+}
+
+proc node(in <-chan Proto) {
+	var v Proto
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error for a two-method interface, got none")
+	}
+	if !strings.Contains(err.Error(), "must declare exactly one method") {
+		t.Errorf("error = %q, want it to explain only one method is allowed", err.Error())
+	}
+}
+
+func TestPlacedChanTaggedUnionMethodHasParams(t *testing.T) {
+	src := []byte(`package main
+
+type Proto interface {
+	isProto(x int)
+}
+
+proc node(in <-chan Proto) {
+	var v Proto
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error for a marker method with parameters, got none")
+	}
+	if !strings.Contains(err.Error(), "must take no parameters") {
+		t.Errorf("error = %q, want it to explain the marker method must take no parameters", err.Error())
+	}
+}
+
+func TestPlacedChanTaggedUnionNoVariants(t *testing.T) {
+	src := []byte(`package main
+
+type Proto interface {
+	isProto()
+}
+
+proc node(in <-chan Proto) {
+	var v Proto
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error for an interface with no implementing type, got none")
+	}
+	if !strings.Contains(err.Error(), "no implementing type") {
+		t.Errorf("error = %q, want it to explain no variant implements the interface", err.Error())
+	}
+}
+
+// TestPlacedChanTaggedUnionPointerReceiverIgnored confirms a
+// pointer-receiver method doesn't count as a variant implementation --
+// every variant in this scheme is constructed and assigned by value
+// (see emitLinkRecvUnion), so a pointer receiver would silently do the
+// wrong thing rather than being a real implementation choice.
+func TestPlacedChanTaggedUnionPointerReceiverIgnored(t *testing.T) {
+	src := []byte(`package main
+
+type Proto interface {
+	isProto()
+}
+
+type Info struct {
+	Code int
+}
+
+func (*Info) isProto() {}
+
+proc node(in <-chan Proto) {
+	var v Proto
+	in -> v
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			place in2 at link[1]
+			node(in2)
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error since the only implementation uses a pointer receiver, got none")
+	}
+	if !strings.Contains(err.Error(), "no implementing type") {
+		t.Errorf("error = %q, want it to explain no (value-receiver) variant implements the interface", err.Error())
+	}
+}
+
 // TestRoleBinaries checks that RoleBinaries emits one standalone,
 // syntactically valid Go file per distinct placed-par role, each with
 // its own main() calling only that role's proc -- and that every

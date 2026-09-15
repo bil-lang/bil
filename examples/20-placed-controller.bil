@@ -4,12 +4,12 @@
 //
 // A heterogeneous placement demo on the WASM-worker grid emulator
 // (../../emulator, a sibling repo — see its README and
-// STRATEGY.md's "Emulator architecture" note), building on Example 19
+// STRATEGY.md's "Emulator architecture" note), building on Example 10
 // (mesh-ripple)'s own origin/reflect/relay split: this one narrows the
 // same three roles to just row 0 (`controller` at (0,0), `rowEnd` at
 // (0,cols-1), `relay` for the rest of that row) and adds a fourth,
 // `idle`, for every row off row 0 — the send/receive pattern in each
-// is exactly Example 19's already-verified one.
+// is exactly Example 10's already-verified one.
 //
 // `place NAME at link[EXPR].in`/`.out` lives in the `placed par` clause
 // that *calls* a proc, not inside the proc's own body: it binds one of

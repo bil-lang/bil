@@ -1,84 +1,3 @@
-### What bilc does with placement
-
-A `.bil` source file expresses placement with two constructs: a `placed par { processor(...) {...} ... processor(*, *) {...} }` block naming which role runs where, and `place NAME at link[EXPR].in`/`.out` statements in the calling clause binding one of that role's own declared channel parameters to a physical link. There is no separate `default` construct — it was removed as exactly, only ever, a third spelling of the fully-wild wildcard forms below. There is also no raw, unplaced `link[idx]` usage left in any example — that style (one proc, same on every node, branching internally on its own position) is a throwback to before `placed par` existed; every current example expresses heterogeneous roles through placement instead. bilc's action on these two constructs is two rewrites, a set of structural requirements it enforces around them, and two generated artifacts.
-
-**Rewrite 1 — `placed par` becomes a runtime switch.** Each `processor(id)` clause becomes `case bilink.ID() == id:`; each `processor(r, c)` clause becomes `case bilink.Row() == r && bilink.Col() == c:`. Either slot of the two-arg form may instead be a literal `*` wildcard: `processor(1, *)` matches every column of row 1 and compiles to just `case bilink.Row() == 1:` (only the pinned dimension is compared); `processor(*, 0)` matches every row's column 0 and compiles to `case bilink.Col() == 0:`. A clause that wildcards both dimensions — `processor(*)` or `processor(*, *)` — matches every node and compiles to Go's own `default:`, and must be the block's last clause, since nothing after it could ever be reached (the fully-wild clause always runs last regardless of where it's written, exactly like Go's own `default:`, so a later clause after it could never be reached). A clause's body may itself be an `if`/`else` chain rather than one bare call — each branch (recursively) either another `if`/`else` or a `place`-decls-then-one-call leaf — letting one `processor(...)` clause dispatch further by some other runtime condition (`bilink.Row() == 0`, say) without a second `placed par` (which isn't allowed to nest inside another one at all). The result is one ordinary `switch {}` in the compiled program — never a `par(...)`, never goroutines. Every node's Worker runs the exact same compiled program; which branch a given node takes depends entirely on `bilink.Row()/Col()/ID()`.
-
-**Rewrite 2 — `place NAME at link[EXPR].in`/`.out` becomes nothing at all.** It's compile-time-only, and it lives at the *call site*, not inside the called proc's own body: a proc declares ordinary directional Go channel parameters (`eastOut chan<- int32`), and the `processor(...)` clause that calls it writes `place eastOut at link[1].out; controller(eastOut)` to bind that parameter. Every reference to `eastOut` inside `controller`'s own body is rewritten straight to the equivalent `bilink.Send`/`Recv` call on link 1 — the Go channel value is never actually touched — so the call site itself passes a bare `nil` for that argument (`controller(nil)`), just enough to satisfy Go's own type-checker. The `.in`/`.out` suffix is documentation only: it says which half of the physical link this name is for, right next to the index itself, rather than leaving a reader to infer direction solely from which of the callee's two parameters this name happens to be passed to. bilc parses and discards it — it's never cross-checked against the callee's declared parameter direction, since a real check would just be re-deriving what that parameter's own type already guarantees at compile time via Go's own type-checker.
-
-**Requirements bilc enforces around both constructs.** Every one of a placed-called proc's channel parameters must be bound by exactly one `place` statement in the clause that calls it (an unbound channel parameter, or a `place` statement nobody's call ends up using, are both rejected); every non-channel parameter, conversely, must be a genuine compile-time constant at that call site — a proc needing runtime information (grid size, its own position) calls `bilink.Row()/Col()/NumRows()/NumCols()/ID()` directly, itself, rather than taking it as a parameter. Every one of those channel parameters must also be declared with an explicit direction (`<-chan T`/`chan<- T`) — a bare, undirected `chan T` (legal on an ordinary proc called from `par`/`seq`) is rejected the moment it's placed-called. This is what makes "a placed-par proc never sends and receives on the same channel" a property Go's own compiler enforces for every placed-called proc, not a best-effort heuristic: `checkProcChanBothDirections`'s own body-scan (still the rule for a non-placed proc's own undirected `chan T` parameters) walks a proc's body looking for a literal send and a literal receive on the parameter's own name, which a channel value passed through an alias (`x := ch; x -> v`) can slip past; a genuinely directional `<-chan T`/`chan<- T` closes that gap completely, since Go itself refuses to compile a receive on a send-only channel value no matter how many aliases it passes through first. Lastly, a given proc may be placed-called from at most one clause (or one `if`/`else` leaf) in the whole block — reusing the same proc as two different roles isn't supported.
-
-**Artifact 1 — one standalone Go source per role.** `RoleBinaries` emits `roles/<name>/main.go` for every distinct proc a `placed par` block calls — the whole file, unchanged, except the placed-par block compiles to a single hardcoded call to just that one role instead of the switch. Every other declaration is still emitted exactly as normal; Go's own linker, not bilc, drops whatever isn't reachable from that one call. (Measured directly: this barely shrinks the compiled `.wasm` — Go's own runtime dominates the binary, not the role code — so its real value is letting a host fetch each distinct role once instead of redundantly re-fetching one shared binary per node; see `../emulator/README.md`'s "Host and boot cascade".)
-
-**Artifact 2 — `roles/deploy.json`, a manifest for a host, not a person.** The only manifest bilc produces (an earlier, deliberately incomplete `.topology.yaml` sibling was dropped as redundant with this one — see `tools/topology2svg`, which now renders straight from `deploy.json` instead). It's complete and mechanical: every reachable leaf (each `if`/`else` branch inside a clause, resolved down to its own bare call — the same leaves Rewrite 1's `if`/`else`-chain clause bodies produce), with that leaf's clause match, its ordered chain of `if`/`else` conditions (as raw source text, plus whether it's the else-side), the proc it calls, and that call's link-index binds. A wildcarded dimension appears as the literal string `"*"` — a host just skips comparing that one dimension, needing no expression evaluator for it at all; a clause that wildcards both (`processor(*)`/`processor(*, *)`) is reported as `"default": true` instead, never as `row`/`col` both `"*"`.
-
-Here's the real, current placement block from `examples/22-pipeline-transformer.bil` — every clause here uses a wildcard:
-
-```bil
-placed par {
-    processor(1, 0) {
-        place north at link[0].in
-        place eastIn at link[1].in
-        place eastOut at link[1].out
-        place south at link[2].out
-        attnController(north, eastIn, eastOut, south)
-    }
-    processor(1, cols-1) {
-        place north at link[0].in
-        place westOut at link[3].out
-        place westIn at link[3].in
-        place south at link[2].out
-        attnRowEnd(north, westOut, westIn, south)
-    }
-    processor(0, *) {
-        place south at link[2].out
-        embedStage(south)
-    }
-    processor(1, *) {
-        place north at link[0].in
-        place eastIn at link[1].in
-        place westOut at link[3].out
-        place westIn at link[3].in
-        place eastOut at link[1].out
-        place south at link[2].out
-        attnRelay(north, eastIn, westOut, westIn, eastOut, south)
-    }
-    processor(2, *) {
-        place north at link[0].in
-        place south at link[2].out
-        ffnStage(north, south)
-    }
-    processor(3, *) {
-        place north at link[0].in
-        outputStage(north)
-    }
-    processor(*, *) {
-        idle()
-    }
-}
-```
-
-...and `roles/deploy.json`, the manifest bilc produces from it (truncated to two leaves — every entry follows the same shape):
-
-```json
-{
-  "transport": "message-channel",
-  "leaves": [
-    {
-      "match": {"row": "0", "col": "*"},
-      "proc": "embedStage",
-      "binds": {"south": "2"}
-    },
-    {
-      "match": {"default": true},
-      "proc": "idle"
-    }
-  ]
-}
-```
-
-Note that `processor(*, *)` collapses to `"default": true` — a host never needs to special-case "wildcards both dimensions" as distinct from "no `processor(...)` matched."
-
 <a id="top"></a>
 
 # The Bil Guide
@@ -130,6 +49,7 @@ Follow the installation and run code instructions in [Getting Started](#bil-star
   - [Example 7: Data-parallel scatter/gather](#example-7)
   - [Example 8: Replicated alternation (many-to-one server)](#example-8)
   - [Example 9: Priority guards](#example-9)
+  - [Example 10: Grid placement (mesh ripple)](#example-10)
 - [Section II: Theory of Operation](#section-ii)
   - [Getting Started](#bil-start)
   - [Bil Features](#bil-features)
@@ -141,15 +61,15 @@ Follow the installation and run code instructions in [Getting Started](#bil-star
   - [Bil and Go](#bil-and-go)
   - [Further reading](#further-reading)
 - [Section IV: Further Bil](#section-iv)
-  - [Example 10: Buffer process](#example-10)
-  - [Example 11: Dining philosophers](#example-11)
-  - [Example 12: Recursive processes](#example-12)
-  - [Example 13: Pipeline (Sieve of Eratosthenes)](#example-13)
-  - [Example 14: Poison-pill shutdown cascade](#example-14)
-  - [Example 15: Semaphore process](#example-15)
-  - [Example 16: Barrier synchronization](#example-16)
-  - [Example 17: Token ring](#example-17)
-  - [Example 18: NxM Mandelbrot](#example-18)
+  - [Example 11: Buffer process](#example-11)
+  - [Example 12: Dining philosophers](#example-12)
+  - [Example 13: Recursive processes](#example-13)
+  - [Example 14: Pipeline (Sieve of Eratosthenes)](#example-14)
+  - [Example 15: Poison-pill shutdown cascade](#example-15)
+  - [Example 16: Semaphore process](#example-16)
+  - [Example 17: Barrier synchronization](#example-17)
+  - [Example 18: Token ring](#example-18)
+  - [Example 19: NxM Mandelbrot](#example-19)
 
 <a id="example-1"></a>
 
@@ -694,6 +614,156 @@ graph LR
 
 ---
 
+### What bilc does with placement
+
+A `.bil` source file expresses placement with two constructs: a `placed par { processor(...) {...} ... processor(*, *) {...} }` block naming which role runs where, and `place NAME at link[EXPR].in`/`.out` statements in the calling clause binding one of that role's own declared channel parameters to a physical link. There is no separate `default` construct — it was removed as exactly, only ever, a third spelling of the fully-wild wildcard forms below. There is also no raw, unplaced `link[idx]` usage left in any example — that style (one proc, same on every node, branching internally on its own position) is a throwback to before `placed par` existed; every current example expresses heterogeneous roles through placement instead. bilc's action on these two constructs is two rewrites, a set of structural requirements it enforces around them, and two generated artifacts.
+
+**Rewrite 1 — `placed par` becomes a runtime switch.** Each `processor(id)` clause becomes `case bilink.ID() == id:`; each `processor(r, c)` clause becomes `case bilink.Row() == r && bilink.Col() == c:`. Either slot of the two-arg form may instead be a literal `*` wildcard: `processor(1, *)` matches every column of row 1 and compiles to just `case bilink.Row() == 1:` (only the pinned dimension is compared); `processor(*, 0)` matches every row's column 0 and compiles to `case bilink.Col() == 0:`. A clause that wildcards both dimensions — `processor(*)` or `processor(*, *)` — matches every node and compiles to Go's own `default:`, and must be the block's last clause, since nothing after it could ever be reached (the fully-wild clause always runs last regardless of where it's written, exactly like Go's own `default:`, so a later clause after it could never be reached). A clause's body may itself be an `if`/`else` chain rather than one bare call — each branch (recursively) either another `if`/`else` or a `place`-decls-then-one-call leaf — letting one `processor(...)` clause dispatch further by some other runtime condition (`bilink.Row() == 0`, say) without a second `placed par` (which isn't allowed to nest inside another one at all). The result is one ordinary `switch {}` in the compiled program — never a `par(...)`, never goroutines. Every node's Worker runs the exact same compiled program; which branch a given node takes depends entirely on `bilink.Row()/Col()/ID()`.
+
+**Rewrite 2 — `place NAME at link[EXPR].in`/`.out` becomes nothing at all.** It's compile-time-only, and it lives at the *call site*, not inside the called proc's own body: a proc declares ordinary directional Go channel parameters (`eastOut chan<- int32`), and the `processor(...)` clause that calls it writes `place eastOut at link[1].out; controller(eastOut)` to bind that parameter. Every reference to `eastOut` inside `controller`'s own body is rewritten straight to the equivalent `bilink.Send`/`Recv` call on link 1 — the Go channel value is never actually touched — so the call site itself passes a bare `nil` for that argument (`controller(nil)`), just enough to satisfy Go's own type-checker. The `.in`/`.out` suffix is documentation only: it says which half of the physical link this name is for, right next to the index itself, rather than leaving a reader to infer direction solely from which of the callee's two parameters this name happens to be passed to. bilc parses and discards it — it's never cross-checked against the callee's declared parameter direction, since a real check would just be re-deriving what that parameter's own type already guarantees at compile time via Go's own type-checker.
+
+**Requirements bilc enforces around both constructs.** Every one of a placed-called proc's channel parameters must be bound by exactly one `place` statement in the clause that calls it (an unbound channel parameter, or a `place` statement nobody's call ends up using, are both rejected); every non-channel parameter, conversely, must be a genuine compile-time constant at that call site — a proc needing runtime information (grid size, its own position) calls `bilink.Row()/Col()/NumRows()/NumCols()/ID()` directly, itself, rather than taking it as a parameter. Every one of those channel parameters must also be declared with an explicit direction (`<-chan T`/`chan<- T`) — a bare, undirected `chan T` (legal on an ordinary proc called from `par`/`seq`) is rejected the moment it's placed-called. This is what makes "a placed-par proc never sends and receives on the same channel" a property Go's own compiler enforces for every placed-called proc, not a best-effort heuristic: `checkProcChanBothDirections`'s own body-scan (still the rule for a non-placed proc's own undirected `chan T` parameters) walks a proc's body looking for a literal send and a literal receive on the parameter's own name, which a channel value passed through an alias (`x := ch; x -> v`) can slip past; a genuinely directional `<-chan T`/`chan<- T` closes that gap completely, since Go itself refuses to compile a receive on a send-only channel value no matter how many aliases it passes through first. Lastly, a given proc may be placed-called from at most one clause (or one `if`/`else` leaf) in the whole block — reusing the same proc as two different roles isn't supported.
+
+**Artifact 1 — one standalone Go source per role.** `RoleBinaries` emits `roles/<name>/main.go` for every distinct proc a `placed par` block calls — the whole file, unchanged, except the placed-par block compiles to a single hardcoded call to just that one role instead of the switch. Every other declaration is still emitted exactly as normal; Go's own linker, not bilc, drops whatever isn't reachable from that one call. (Measured directly: this barely shrinks the compiled `.wasm` — Go's own runtime dominates the binary, not the role code — so its real value is letting a host fetch each distinct role once instead of redundantly re-fetching one shared binary per node; see `../emulator/README.md`'s "Host and boot cascade".)
+
+**Artifact 2 — `roles/deploy.json`, a manifest for a host, not a person.** The only manifest bilc produces (an earlier, deliberately incomplete `.topology.yaml` sibling was dropped as redundant with this one — see `tools/topology2svg`, which now renders straight from `deploy.json` instead). It's complete and mechanical: every reachable leaf (each `if`/`else` branch inside a clause, resolved down to its own bare call — the same leaves Rewrite 1's `if`/`else`-chain clause bodies produce), with that leaf's clause match, its ordered chain of `if`/`else` conditions (as raw source text, plus whether it's the else-side), the proc it calls, and that call's link-index binds. A wildcarded dimension appears as the literal string `"*"` — a host just skips comparing that one dimension, needing no expression evaluator for it at all; a clause that wildcards both (`processor(*)`/`processor(*, *)`) is reported as `"default": true` instead, never as `row`/`col` both `"*"`.
+
+
+
+```go
+	cols := bilink.NumCols()
+
+	placed par {
+		processor(*, 0) { //
+			place eastOut at link[1].out
+			place eastIn at link[1].in
+			origin(eastOut, eastIn)
+		}
+		processor(*, cols-1) {
+			place westIn at link[3].in
+			place westOut at link[3].out
+			reflect(westIn, westOut)
+		}
+		processor(*, *) {
+			place westIn at link[3].in
+			place eastOut at link[1].out
+			place eastIn at link[1].in
+			place westOut at link[3].out
+			relay(westIn, eastOut, eastIn, westOut)
+		}
+	}
+```
+
+...and `roles/deploy.json`, the manifest bilc produces from it (truncated to two leaves — every entry follows the same shape):
+
+```json
+{
+  "transport": "message-channel",
+  "leaves": [
+    {
+      "match": {"row": "0", "col": "*"},
+      "proc": "embedStage",
+      "binds": {"south": "2"}
+    },
+    {
+      "match": {"default": true},
+      "proc": "idle"
+    }
+  ]
+}
+```
+
+Note that `processor(*, *)` collapses to `"default": true` — a host never needs to special-case "wildcards both dimensions" as distinct from "no `processor(...)` matched."
+
+---
+
+<a id="example-10"></a>
+
+### Example 10: Grid placement (mesh ripple)
+
+Let's leave a single machine's goroutines behind and place processes onto physically separate processors. This one runs on Bil's own WASM-worker grid emulator (other emulators are available), a real NxM array of nodes, each an isolated Web Worker wired to its four nearest neighbours (N/E/S/W) by physical, blocking point-to-point links (`bilink`) rather than on processor channels. `placed par` replaces `par` here: its `processor(...)` clauses `place` channel parameters onto physical `link`s and then calls a top level `proc` for that processor.
+
+A counter ripples east along every row from `origin` (column 0), forwarded hop-by-hop by `relay` (every other column, wildcarded with `processor(*, *)` so the same code runs identically on every row — row never matters here, the ripple on each row is independent), reflects at the last column (`reflect`), and ripples back west the same way. `waves = 3` full round trips.
+
+```go
+package main
+
+const waves = 3
+
+proc origin(eastOut chan<- int32, eastIn <-chan int32) {
+	for wave := range waves {
+		eastOut <- int32(wave)
+		eastIn -> _
+	}
+}
+
+proc reflect(westIn <-chan int32, westOut chan<- int32) {
+	for wave := range waves {
+		westIn :-> v
+		westOut <- v
+	}
+}
+
+proc relay(westIn, eastIn <-chan int32, eastOut, westOut chan<- int32) {
+	for wave := range waves {
+		westIn :-> v
+		eastOut <- v
+
+		eastIn :-> v2
+		westOut <- v2
+	}
+}
+
+func main() {
+	cols := bilink.NumCols()
+
+	placed par {
+		processor(*, 0) {
+			place eastOut at link[1].out
+			place eastIn at link[1].in
+			origin(eastOut, eastIn)
+		}
+		processor(*, cols-1) {
+			place westIn at link[3].in
+			place westOut at link[3].out
+			reflect(westIn, westOut)
+		}
+		processor(*, *) {
+			place westIn at link[3].in
+			place eastIn at link[1].in
+			place eastOut at link[1].out
+			place westOut at link[3].out
+			relay(westIn, eastIn, eastOut, westOut)
+		}
+	}
+}
+```
+
+Running it: `bil emu examples/10-mesh-ripple.bil` builds and serves the grid emulator, auto-sizing the grid so every placed role gets its own node, then opens it in a browser. Unlike Examples 1–9, there's no terminal output to check byte-for-byte — the ripple plays out purely as link activity on the grid page, 3 full round trips east then west on every row. The channels here carry `int32`, not the plain `int` every earlier example used: `place` rewrites each send/receive straight to `bilink.Send`/`Recv`, and those are hardcoded to `int32` (the physical link primitive moves one 32-bit word per round trip), so a placed channel's element type has to match exactly for the generated code to type-check.
+
+#### Topology
+
+```mermaid
+graph TB
+    subgraph row0["row 0"]
+        direction LR
+        o0["origin"] <-->|link1/link3| r0["relay"] <-->|link1/link3| d0["···"] <-->|link1/link3| f0["reflect"]
+    end
+    subgraph row1["row 1"]
+        direction LR
+        o1["origin"] <-->|link1/link3| r1["relay"] <-->|link1/link3| d1["···"] <-->|link1/link3| f1["reflect"]
+    end
+    subgraph rowN["row N-1"]
+        direction LR
+        oN["origin"] <-->|link1/link3| rN["relay"] <-->|link1/link3| dN["···"] <-->|link1/link3| fN["reflect"]
+    end
+    row0 ~~~ row1 ~~~ dotsRow["⋮"] ~~~ rowN
+```
+
+[^^](#top)
+
+---
+
 <a id="section-ii"></a>
 
 ## Section II: Theory of Operation
@@ -785,21 +855,21 @@ cd tools/bil && go build -o bil . && cd ../..
 
 ### Bil Features
 
-Bil includes a preprocessor (`bilc`) that converts Bil code (`.bil`) to Go code (`.go`) to introduce selected occam features into a modern Go setting. Almost all Go features are preserved in the Bil programming model (types, control flow, expressions, structs, functions, etc.), with the notable exceptions of `go` (i.e. to start a goroutine) and buffered `chan`s. These are replaced by an occam-style Communicating Sequential Parallel (CSP) model which reshapes `go` operations to `par` blocks and performs blocking input and output via unbuffered `chan`s.
+Bil includes a preprocessor (`bilc`) that converts Bil code (`.bil`) to Go code (`.go`) to introduce selected parallel programming features into a modern Go setting. Almost all Go features are preserved in the Bil programming model (types, control flow, expressions, structs, functions, etc.), with the notable exceptions of `go` (i.e. to start a goroutine) and buffered `chan`s. These are replaced by an occam-style Communicating Sequential Parallel (CSP) model which reshapes `go` operations to `par` blocks and performs blocking input and output via unbuffered `chan`s.
 
----
+#### General
 
 The following keywords are provided by Bil:
 
-#### `par`
+##### `par`
 
-Runs its branches as concurrent goroutines and joins on completion — occam's `PAR`. A static `par{A B}` becomes `par(func(){A}, func(){B})`; the replicated form `par VAR := range N {X}` becomes `parFor(N, func(VAR int){X})`, one goroutine per index.
+Runs its branches as concurrent goroutines and joins on completion. A static `par{A B}` becomes `par(func(){A}, func(){B})`; the replicated form `par VAR := range N {X}` becomes `parFor(N, func(VAR int){X})`, one goroutine per index.
 
-#### `seq`
+##### `seq`
 
 Wraps a block to indicate a `par` branch's own sequential body — sugar for a bare `{...}` block (`seq{X}` → `{X}`), provided for readability rather than semantic necessity, since Go statements already execute sequentially by default.
 
-#### `chan ->` and `chan :->`
+##### `chan ->` and `chan :->`
 
 Receive sugar for `chan`, read left-to-right like occam's `?`. Two forms, mirroring Go's own `=`/`:=` split for a channel receive:
 
@@ -808,19 +878,19 @@ Receive sugar for `chan`, read left-to-right like occam's `?`. Two forms, mirror
 
 Either form takes an optional comma-ok suffix, mirroring Go's own two-value channel receive: e.g. `c -> x, ok` is `x, ok = <-c`. Either form takes the Go idiomatic `_` also. Either form generalizes to a receive on a method/function call when the right side is call-shaped (`c -> Method(args)` → `<-c.Method(args)`, e.g. `time -> After(d)`). `:->` also can be used in a type-switch guard: `switch c :-> v.(type) { case T1: ...; case T2: ... }` is `switch v := (<-c).(type) { ... }`, `v` a fresh binding as usual.
 
-#### `proc`
+##### `proc`
 
 An alias for `func` to indicate a code unit that is intended to be run as an independent process - sugar for a `func`, provided for readability rather than semantic necessity, since Bil checks both `proc` and `func` blocks for the same parallel constraints.
 
-#### `alt`
+##### `alt`
 
-Waits on whichever of several channel operations becomes ready first, then runs that one branch — occam's `ALT`, rewritten to Go's `select`. Guards read left-to-right (`chan -> target { body }` or `chan :-> target { body }`, echoing occam's `chan ? x`) rather than Go's `case x := <-chan:`; a `(cond) &&` prefix gives a conditional guard, and `VAR := range EXPR {...}` gives the replicated form (one process listening across a runtime-sized set of channels, via `altN`). The bind target's `->`/`:->` choice (see `#### chan ->` above) is the same in every one of these shapes — plain, conditional, or replicated — including the replicated form, where only `VAR` (the winning replica index) is always fresh; that's a property of `altN`'s runtime dispatch, not of which arrow the bind target uses.
+Waits on whichever of several channel operations becomes ready first, then runs that one branch — occam's `ALT`, rewritten to Go's `select`. Guards read left-to-right (`chan -> target { body }` or `chan :-> target { body }`, echoing occam's `chan ? x`) rather than Go's `case x := <-chan:`; a `(cond) &&` prefix gives a conditional guard, and `VAR := range EXPR {...}` gives the replicated form (one process listening across a runtime-sized set of channels, via `altN`). The bind target's `->`/`:->` choice (see `##### chan ->` above) is the same in every one of these shapes — plain, conditional, or replicated — including the replicated form, where only `VAR` (the winning replica index) is always fresh; that's a property of `altN`'s runtime dispatch, not of which arrow the bind target uses.
 
-#### `pri alt`
+##### `pri alt`
 
 Like `alt`, but guards are tried in priority order — the first ready one wins, even if a lower-priority one is also ready. Go's `select` has no priority concept, so this desugars to a cascade of nested `select`s, one per priority level, instead of a single one.
 
-#### `skip` and `stop`
+##### `skip` and `stop`
 
 Bil implementaion of occam's useful pair: `skip` terminates immediately (does nothing, succeeds); `stop` never terminates (deliberate, inert halt).
 
@@ -828,11 +898,25 @@ A `skip {}` block also acts as the default guard for an `alt` - if no channel is
 
 `stop` rewrites to `time.Sleep(1<<63 - 1)` rather than `select{}`, since Go's runtime treats `select{}` as provably permanent and panics if it's ever the last live goroutine; a pending timer isn't, so it can sit there indefinitely without crashing.
 
----
+#### Placement
+
+##### `placed par`
+
+Like `par`, but its branches are `processor(...)` clauses. `placed par` compiles, per role, to two artifacts: a standalone `roles/<name>/main.go` for every distinct called proc, and `roles/deploy.json` — a manifest listing every reachable leaf with its match, the `proc` it calls, and its link-index bindings.
+
+##### `processor`
+
+ Specifies a physical processor and must contain exactly one `proc` call. `processor(id)` matches by flat ID; `processor(row, col)` matches by grid position, and either slot may be the literal wildcard `*` (`processor(1, *)` matches every column of row 1; `processor(*, *)` matches every node and must be the block's last clause). The body may be an `if`/`else` chain instead of one bare call, letting a single `processor(...)` dispatch further on another runtime condition. Nesting `placed par` isn't allowed. A given `proc` may be placed-called from at most one clause in the whole block.
+
+##### `place`
+
+Binds one of a placed-called proc's own directional channel parameters to a physical point-to-point link, written at the *call site*: `place eastOut at link[1].out; controller(eastOut)`. A placed-called `proc` may only take `chan` and compile-time constant parameters. Every channel parameter must be bound by exactly one `place` statement, and must be declared with an explicit direction (e.g. `proc controller(eastOut chan<- int)`).
+
+#### Helpers
 
 The following helper `func`s are provided by Bil as a built in "how to" correctly split an `Array` for distribution across a replicated `par`. Source code is shown here, which may be coped into your own splitter `func` as needed:
 
-#### `splitN`
+##### `splitN`
 
 Splits a slice into `n` disjoint chunks (any remainder folded into the last one), `chunks := splitN(data, n)` — the one sanctioned way to divide a shared array across `par` branches. Chunks are views into the same backing array, not copies; each chunk's disjointness from every other is proven once, by `vet`'s `regions.go`, rather than trusted or re-derived by hand at every call site.
 
@@ -852,7 +936,7 @@ func splitN[T any](s []T, n int) [][]T {
 }
 ```
 
-#### `splitN2D`
+##### `splitN2D`
 
 The 2D counterpart of `splitN` — splits a matrix (`[][]T`) into an `nr`×`nc` grid of rectangular tiles, `tiles := splitN2D(matrix, nr, nc)`, each `tiles[i][j]` proven disjoint from every other tile by `vet`'s `grid.go`. A separate function, not a variadic extension of `splitN`: Go generics can't unify a 1D and 2D splitter behind one signature, since the input type itself changes shape with dimensionality (`[]T` vs `[][]T`), not just a type parameter.
 
@@ -897,7 +981,7 @@ Bil provides an occam-style Communicating Sequential Parallel (CSP) model where 
 
 Since the branches of a `par` cannot be guaranteed to have shared memory, the Bil transpiler performs a number of checks across `par` branches to flag code that depends on shared memory, for a `pointer` declared in an outer scope (a free variable) cannot be passed into a `func` in more than one branch.
 
-Five checks are done:
+Six checks are done:
 
 ##### par chans
 
@@ -918,6 +1002,10 @@ Five checks are done:
 ##### par timers
 
 - Any `time` channel can be used for input on mutiple par branches.
+
+##### placed par
+
+- Each branch takes one `proc`. Every channel parameter of the `proc` must be explicitly directional (`<-chan T`/`chan<- T`) and bound with a `place` statement; every non-channel parameter must be a compile-time constant; a `proc` may be placed-called from at most one clause in a `placed par`; no nesting.
 
 [^^](#top)
 
@@ -1114,9 +1202,9 @@ flowchart TB
 
 ## Section IV: Further Bil
 
-<a id="example-10"></a>
+<a id="example-11"></a>
 
-### Example 10: Buffer process
+### Example 11: Buffer process
 
 Channels can't be buffered, so the answer is an explicit buffer *process* holding an internal queue, using a **guarded `alt`**. That is `(cond) && c -> x` — a boolean condition guard combined with a channel input.
 
@@ -1191,9 +1279,9 @@ graph LR
 
 ---
 
-<a id="example-11"></a>
+<a id="example-12"></a>
 
-### Example 11: Dining philosophers
+### Example 12: Dining philosophers
 
 CSP's most famous example. Replicated `par`, shared-resource contention with no shared memory, real constructible deadlock, and the classic fix (asymmetric ordering or an arbitrator process). First example about failure modes, not just happy-path communication. `N = 5` philosophers, `N` forks arranged in a circle — `fork[i]` is philosopher `i`'s left fork and philosopher `i-1`'s right fork — each philosopher eats `MEALS = 2` times, needing both forks held simultaneously to eat. A fork is itself a process, not a shared variable or lock: mutual exclusion falls straight out of a channel only ever completing one rendezvous at a time, no separate synchronization primitive needed. The naive version (every philosopher picks up left then right) is genuinely deadlock-*prone*, not deadlock-*guaranteed* — see below, this took actually running it many times to characterize correctly. The version shown applies the classic fix: one philosopher (arbitrarily, the last) picks up right before left, breaking the circular wait.
 
@@ -1261,9 +1349,9 @@ graph LR
 
 ---
 
-<a id="example-12"></a>
+<a id="example-13"></a>
 
-### Example 12: Recursive processes
+### Example 13: Recursive processes
 
 A binary tree of processes for parallel reduction. A naturally "processor array"-shaped topology, `reduceSum` sums an array by splitting it in half, recursively summing each half *concurrently* (itself, called again, as two `par` branches), and adding the two partial sums — a binary tree of processes whose depth (`log2(N)`) is set by the input size at runtime, not by any replication count fixed at compile time.
 
@@ -1320,9 +1408,9 @@ graph TD
 
 ---
 
-<a id="example-13"></a>
+<a id="example-14"></a>
 
-### Example 13: Pipeline (Sieve of Eratosthenes)
+### Example 14: Pipeline (Sieve of Eratosthenes)
 
 The canonical parallel demo: a chain of N filter processes, each one's output channel is the next one's input. First N-stage topology — everything so far has been 2 processes. A bounded `generator` feeds the pipeline 2..30; each `filter` treats the first value it ever receives as its own prime (printing it), then forwards on every later value that isn't a multiple of that prime. `N = 10` and `LIMIT = 30` are chosen to line up exactly — there are exactly 10 primes ≤ 30 — so every value the generator produces is fully consumed by the 10 filter stages; nothing is left trying to forward past the end of the chain into a void.
 
@@ -1381,9 +1469,9 @@ graph LR
 
 ---
 
-<a id="example-14"></a>
+<a id="example-15"></a>
 
-### Example 14: Poison-pill shutdown cascade
+### Example 15: Poison-pill shutdown cascade
 
 A sentinel value (or done-channel) propagated down a whole pipeline to shut it down cleanly, stage by stage. Directly revisits sieve pipeline example — same `generator`/`filter` shapes, same topology — but where that one left every `filter` blocked forever (avoiding a crash only because `generator` calls `stop`), this one actually terminates: `generator` sends a sentinel (`0`, never a valid candidate) after its real values instead of calling `stop`; each `filter` forwards the sentinel downstream and returns instead of looping forever; a new `sink` process, added specifically so the *last* filter has somewhere to forward the sentinel to, receives it and returns too. Every process now has a real exit — no `stop` anywhere in this version.
 
@@ -1439,7 +1527,7 @@ func main() {
 }
 ```
 
-Running it prints the same 10 primes as Example 13, in the same order (`2 3 5 7 11 13 17 19 23 29`) — deterministically and then **exits cleanly**.
+Running it prints the same 10 primes as Example 14, in the same order (`2 3 5 7 11 13 17 19 23 29`) — deterministically and then **exits cleanly**.
 
 #### Topology
 
@@ -1456,9 +1544,9 @@ graph LR
 
 ---
 
-<a id="example-15"></a>
+<a id="example-16"></a>
 
-### Example 15: Semaphore process
+### Example 16: Semaphore process
 
 Build P/V from just channels + `alt`" idiom — a reusable synchronization primitive built from scratch. `nClients = 3` clients each acquire-then-release a shared counting semaphore (`maxCount = 2`) `cycles = 2` times; the semaphore process holds no separate request/release channel pair per client — just one channel each — and tells the two apart from its own per-client `held[i]` state, not from anything the client says. Uses replicated `alt i := range nClients` directly, plus the per-replica guard added to it afterward: the guard `(held[i] || count > 0)` is what actually enforces "never grant more than `maxCount` concurrent holders," not any check *after* a message is received (by the time a message's been received, the rendezvous already happened — refusing it would be too late).
 
@@ -1526,9 +1614,9 @@ graph LR
 
 ---
 
-<a id="example-16"></a>
+<a id="example-17"></a>
 
-### Example 16: Barrier synchronization
+### Example 17: Barrier synchronization
 
 N-way mid-computation rendezvous — all N processes must arrive before any proceeds. Common in iterative/stencil array codes. Orthogonal to `par`'s end-of-process join, which is only ever a one-time, end-of-execution synchronization: `nWorkers = 3` workers each do `rounds = 3` rounds of "work" (here, just printing), and none may start round *r+1* until every worker has finished round *r* — a repeated, mid-run rendezvous, not the single end-of-execution one `par` already gives for free.
 
@@ -1587,9 +1675,9 @@ graph LR
 
 ---
 
-<a id="example-17"></a>
+<a id="example-18"></a>
 
-### Example 17: Token ring
+### Example 18: Token ring
 
 Ring topology, distributed coordination via token passing (mutual exclusion or leader election). `nNodes = 4` peer processes, wired in a cycle (each node's `out` is the next node's `in`), pass a single `int` token around for `rounds = 2` full laps, incrementing it each hop — no distinguished server/collector process this time - every node here runs the identical `node` `proc`, just parameterized by `id`.
 
@@ -1639,9 +1727,9 @@ graph LR
 
 ---
 
-<a id="example-18"></a>
+<a id="example-19"></a>
 
-### Example 18: NxM Mandelbrot
+### Example 19: NxM Mandelbrot
 
 Data-parallel array computation of the Mandelbtor set with a farmer-worker load-balancing pattern. Escape-time cost varies wildly per pixel, so this likely wants dynamic task assignment rather than Example 6's static equal partitioning. `width = 44`, `height = 22` (968 pixels), `nWorkers = 3`: the farmer hands out one pixel at a time to whichever worker's `ALT` fires first, rather than pre-splitting the grid into 3 fixed chunks up front - using "the farmer already knows what a message means from its own bookkeeping" trick (`assigned[w]`), applied to a genuinely data-parallel workload instead of a synchronization primitive. The result is rendered as an actual picture, not a table of numbers: each pixel's escape-time count is bucketed into a 10-level density ramp (`" .:-=+*#%@"`, light to dense) and printed as one character per pixel, one line per row. The complex-plane viewport (`xmin`/`xmax`/`ymin`/`ymax`) is read interactively at startup rather than hardcoded, so the same program can render any region — pan or zoom — without editing source; grid resolution (`width`/`height`), worker count, and iteration cap stay fixed.
 
