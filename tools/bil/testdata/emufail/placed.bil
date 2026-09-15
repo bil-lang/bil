@@ -1,0 +1,13 @@
+package main
+
+proc idle() {
+	stop
+}
+
+func main() {
+	placed par {
+		processor(*, *) {
+			idle()
+		}
+	}
+}

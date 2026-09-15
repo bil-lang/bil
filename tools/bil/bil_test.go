@@ -74,6 +74,46 @@ func TestVetFail(t *testing.T) {
 	})
 }
 
+// TestPlacedProgramRedirectsToEmu checks that a `placed par` program is
+// rejected by both `bil run` and `bil vet` with a clear redirect to
+// `bil emu` -- not vet.Check's raw, misleading "could not import
+// emulator/bilink" importer failure (see runCmd's own comment on why that
+// import can never resolve there).
+func TestPlacedProgramRedirectsToEmu(t *testing.T) {
+	const src = "testdata/emufail/placed.bil"
+
+	t.Run("run", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCmd(src, true, &stdout, &stderr)
+		if code == 0 {
+			t.Fatal("runCmd(execute=true) returned 0, want non-zero")
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("stdout not empty, program should not have run: %q", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "bil emu") {
+			t.Errorf("stderr = %q, want a `bil emu` redirect", stderr.String())
+		}
+		if strings.Contains(stderr.String(), "could not import") {
+			t.Errorf("stderr = %q, still leaking the raw importer failure", stderr.String())
+		}
+	})
+
+	t.Run("vet", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCmd(src, false, &stdout, &stderr)
+		if code == 0 {
+			t.Fatal("runCmd(execute=false) returned 0, want non-zero")
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("stdout not empty: %q", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "bil emu") {
+			t.Errorf("stderr = %q, want a `bil emu` redirect", stderr.String())
+		}
+	})
+}
+
 // TestVetFailLineAfterAlt is TestVetFail's line-mapping counterpart: the
 // violation here sits after a guarded `alt`, which bilc desugars into
 // several lines of synthetic setup (bilGuard0 := ...; if !cond {...};

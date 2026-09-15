@@ -60,6 +60,27 @@ func runCmd(src string, execute bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// A `placed par` program imports emulator/bilink, which vet.Check's
+	// go/importer ("source" mode, no Go-modules awareness) can never
+	// resolve -- not a real violation, just a hard limitation (see
+	// emuCmd's own comment on this in emu.go). Catching it here, the same
+	// way emuCmd already does via RoleBinaries, turns a confusing raw
+	// importer failure into an accurate redirect to `bil emu`, the only
+	// command that can actually run a grid-targeted program.
+	roles, err := bilc.RoleBinaries(src, in)
+	if err != nil {
+		fmt.Fprintln(stderr, "role split error:", err)
+		return 1
+	}
+	if roles != nil {
+		verb := "vet"
+		if execute {
+			verb = "run"
+		}
+		fmt.Fprintf(stderr, "bil: %s uses `link[...]`/`placed par` — it targets the grid emulator, not this machine. Use `bil emu` instead of `bil %s`.\n", src, verb)
+		return 1
+	}
+
 	tmp, err := os.CreateTemp("", "bil-*.go")
 	if err != nil {
 		fmt.Fprintln(stderr, err)
