@@ -238,11 +238,12 @@ func main() {
 // bilink calls, with the bilink import auto-injected the same way
 // `stop` pulls in "time" and `altN` pulls in "reflect". It can't use
 // the TestOK ok/*.bil shape: the generated code imports
-// emulator/nodeprog/bilink, a different Go module this one doesn't
-// depend on (see ../../../emulator, a sibling repo) and which is
-// //go:build js && wasm-gated besides — building it here, on the host
-// arch, can't work at all. Checking the transformed text is the right
-// level of check; see emulator/README.md for how this actually runs.
+// emulator/bilink, a different Go module this one doesn't
+// depend on (see ../../../emulator, a sibling repo) — building it
+// here can't work at all regardless of platform. Checking the
+// transformed text is the right level of check; see
+// emulator/README.md for how this actually runs (in-browser via WASM,
+// or natively via cmd/multicore).
 func TestLinkRewrite(t *testing.T) {
 	src := []byte(`package main
 
@@ -267,7 +268,7 @@ func main() {
 	if !strings.Contains(got, "bilink.Send(east, v)") {
 		t.Errorf("expected `link[east] <- v` to rewrite to `bilink.Send(east, v)`, got:\n%s", got)
 	}
-	if !strings.Contains(got, `import "emulator/nodeprog/bilink"`) {
+	if !strings.Contains(got, `import "emulator/bilink"`) {
 		t.Errorf("expected the bilink import to be auto-injected, got:\n%s", got)
 	}
 
@@ -276,7 +277,7 @@ func main() {
 	// etc. already follow via hasImport.
 	srcWithImport := []byte(`package main
 
-import "emulator/nodeprog/bilink"
+import "emulator/bilink"
 
 proc node() {
 	var v int32
@@ -291,7 +292,7 @@ func main() {
 	if err != nil {
 		t.Fatalf("Transform (pre-imported): %v", err)
 	}
-	if n := strings.Count(string(out2), `"emulator/nodeprog/bilink"`); n != 1 {
+	if n := strings.Count(string(out2), `"emulator/bilink"`); n != 1 {
 		t.Errorf("expected exactly one bilink import, got %d in:\n%s", n, out2)
 	}
 }
@@ -346,10 +347,14 @@ func main() {
 			t.Errorf("expected %q in output, got:\n%s", want, got)
 		}
 	}
-	if !strings.Contains(got, "//go:build js && wasm") {
-		t.Errorf("expected the js/wasm build tag to be auto-injected, got:\n%s", got)
+	if strings.Contains(got, "//go:build") {
+		// bilink itself owns the platform split (js/wasm vs. native --
+		// see emulator/bilink/bilink.go and bilink_native.go), so
+		// generated code that merely calls into it must stay
+		// build-tag-free to be buildable under either.
+		t.Errorf("expected no build tag on generated code (bilink owns that split), got:\n%s", got)
 	}
-	if n := strings.Count(got, `"emulator/nodeprog/bilink"`); n != 1 {
+	if n := strings.Count(got, `"emulator/bilink"`); n != 1 {
 		t.Errorf("expected exactly one bilink import, got %d in:\n%s", n, got)
 	}
 }
@@ -457,7 +462,7 @@ func main() {
 	if !strings.Contains(got, "node(nil, nil)") {
 		t.Errorf("expected the placed call's channel arguments to become nil, got:\n%s", got)
 	}
-	if !strings.Contains(got, `import "emulator/nodeprog/bilink"`) {
+	if !strings.Contains(got, `import "emulator/bilink"`) {
 		t.Errorf("expected the bilink import to be auto-injected, got:\n%s", got)
 	}
 }

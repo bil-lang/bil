@@ -1697,7 +1697,7 @@ func (t *transformer) resolvePlaceAlias(i int) (idxExpr string, ok bool) {
 // at link[EXPR]` declaration in this same proc/func body (see
 // resolvePlaceAlias) — `link` is Bil's reserved, index-addressed array of
 // nearest-neighbour links (an emulator concept: see
-// ../../emulator/README.md and its nodeprog/bilink package), not a real
+// ../../emulator/README.md and its bilink package), not a real
 // Go channel — the physical link crosses a WASM-instance/Worker boundary,
 // which no in-process Go channel can express. `link[idx]` already parses
 // as an ordinary primary expression (parsePrimaryExpr handles `base[idx]`
@@ -3115,15 +3115,6 @@ func transformSource(filename string, src []byte, roleOverride string) ([]byte, 
 	}
 	pkgEnd += pkgStart
 	var full bytes.Buffer
-	if t.usedLink || t.usedPlacement {
-		// bilink only exists under this build constraint (it's backed by
-		// syscall/js) -- a program using `link[...]` or `placed par`
-		// (which also calls into bilink, for Row()/Col()/ID()) can only
-		// ever run there, so this is auto-injected the same way the
-		// import is, rather than left for whoever places the generated
-		// file to remember by hand.
-		full.WriteString("//go:build js && wasm\n\n")
-	}
 	full.Write(body[:pkgEnd])
 	full.WriteString(importSync)
 	if t.usedStop && !t.hasImport("time") {
@@ -3132,8 +3123,8 @@ func transformSource(filename string, src []byte, roleOverride string) ([]byte, 
 	if t.usedAltN && !t.hasImport("reflect") {
 		full.WriteString("\nimport \"reflect\"\n")
 	}
-	if (t.usedLink || t.usedPlacement) && !t.hasImport("emulator/nodeprog/bilink") {
-		full.WriteString("\nimport \"emulator/nodeprog/bilink\"\n")
+	if (t.usedLink || t.usedPlacement) && !t.hasImport("emulator/bilink") {
+		full.WriteString("\nimport \"emulator/bilink\"\n")
 	}
 	full.Write(body[pkgEnd:])
 	full.WriteString(parHelper)
