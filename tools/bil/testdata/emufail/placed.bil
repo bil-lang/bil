@@ -1,6 +1,7 @@
 package main
 
 proc idle() {
+	bilink.Screenf("idle")
 	stop
 }
 

@@ -14,46 +14,111 @@ package vet
 import (
 	"fmt"
 	"go/ast"
-	"go/importer"
-	"go/parser"
 	"go/token"
 	"go/types"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"golang.org/x/tools/go/packages"
 )
 
-// analyzeFile parses and type-checks the Go source at path. typeErrs
-// carries any type-checking errors (collected, not fatal individually —
-// go/types keeps checking and populating info as far as it can).
+// analyzeFile parses and type-checks the Go source at path, resolving its
+// imports via golang.org/x/tools/go/packages (a real, module-aware
+// resolver -- it shells out to the `go` command itself, the same one
+// `go build` would use) rather than go/importer's old "source" mode,
+// which only ever understood classic GOPATH-style directory lookup and
+// could never resolve a real module import like `emulator/bilink` (the
+// sibling emulator repo, its own separate go.mod-based module).
+//
+// path is staged into a fresh, private temp directory of its own (see
+// analyzeFileWithModule) rather than analyzed in place: go/packages
+// resolves a whole package (every .go file in a directory), not one
+// file in isolation the way the old parser.ParseFile-based analyzeFile
+// did, and path's own directory can't be assumed to contain nothing
+// else relevant -- confirmed directly: this file's own test suite keeps
+// dozens of unrelated single-file fixtures side by side in testdata/,
+// each meant to be checked as if it were the only file in the world.
+// Staging a private copy elsewhere restores that isolation.
+//
+// typeErrs carries any type-checking errors (collected, not fatal
+// individually -- go/types keeps checking and populating info as far as
+// it can), exactly matching the previous go/importer-based behavior's
+// contract with Check below.
 func analyzeFile(fset *token.FileSet, path string) (file *ast.File, info *types.Info, typeErrs []error, err error) {
-	file, err = parser.ParseFile(fset, path, nil, parser.AllErrors)
+	return analyzeFileWithModule(fset, path, nil)
+}
+
+// analyzeFileWithModule is analyzeFile, plus extraGoMod: zero or more
+// additional lines appended to the generated go.mod's body -- e.g. a
+// `require`/`replace` pair giving path's own import of a real external
+// module (the sibling emulator repo, say) something to resolve against.
+// Check uses this to support a placed/link program's `import
+// "emulator/bilink"`; every other caller (including every existing test
+// in this package, via plain analyzeFile) needs nothing beyond the
+// standard library, so they get a bare go.mod with no extraGoMod at all.
+func analyzeFileWithModule(fset *token.FileSet, path string, extraGoMod []string) (file *ast.File, info *types.Info, typeErrs []error, err error) {
+	src, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-
-	info = &types.Info{
-		Defs:  make(map[*ast.Ident]types.Object),
-		Uses:  make(map[*ast.Ident]types.Object),
-		Types: make(map[ast.Expr]types.TypeAndValue),
+	dir, err := os.MkdirTemp("", "bilvet-*")
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	conf := types.Config{
-		Importer: importer.ForCompiler(fset, "source", nil),
-		Error: func(err error) {
-			typeErrs = append(typeErrs, err)
-		},
-	}
-	conf.Check(file.Name.Name, fset, []*ast.File{file}, info)
+	defer os.RemoveAll(dir)
 
-	return file, info, typeErrs, nil
+	stagedPath := filepath.Join(dir, filepath.Base(path))
+	if err := os.WriteFile(stagedPath, src, 0o644); err != nil {
+		return nil, nil, nil, err
+	}
+	goMod := "module bilcheck\n\ngo 1.25.0\n"
+	if len(extraGoMod) > 0 {
+		goMod += "\n" + strings.Join(extraGoMod, "\n") + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0o644); err != nil {
+		return nil, nil, nil, err
+	}
+
+	cfg := &packages.Config{
+		Mode: packages.LoadAllSyntax,
+		Dir:  dir,
+		Fset: fset,
+	}
+	pkgs, err := packages.Load(cfg, ".")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(pkgs) != 1 {
+		return nil, nil, nil, fmt.Errorf("expected exactly one package in %s, got %d", dir, len(pkgs))
+	}
+	pkg := pkgs[0]
+	if len(pkg.Syntax) != 1 {
+		return nil, nil, nil, fmt.Errorf("expected exactly one file in package %s, got %d", pkg.PkgPath, len(pkg.Syntax))
+	}
+	for _, e := range pkg.Errors {
+		typeErrs = append(typeErrs, e)
+	}
+
+	return pkg.Syntax[0], pkg.TypesInfo, typeErrs, nil
 }
 
 // Check parses, type-checks, and runs all of Bil's usage checks against the
-// Go file at path. err is non-nil only when the file couldn't be analyzed
-// at all (I/O or parse failure) — a file that parses and type-checks but
-// fails one or more Bil rules returns a nil err with a non-empty messages
-// slice. Each message is a fully formatted, ready-to-print line (position,
+// Go file at path. extraGoMod, if given, is passed straight through to
+// analyzeFileWithModule -- extra `require`/`replace` lines for the
+// generated go.mod path is staged alongside, needed when path imports a
+// real external module (see tools/bil/main.go's runCmd, which passes a
+// `replace emulator => ...` line for a placed/link program). Omit it
+// entirely for an ordinary program that only needs the standard library.
+//
+// err is non-nil only when the file couldn't be analyzed at all (I/O or
+// parse failure) — a file that parses and type-checks but fails one or
+// more Bil rules returns a nil err with a non-empty messages slice.
+// Each message is a fully formatted, ready-to-print line (position,
 // description, and rationale). ok := err == nil && len(messages) == 0.
-func Check(path string) (messages []string, err error) {
+func Check(path string, extraGoMod ...string) (messages []string, err error) {
 	fset := token.NewFileSet()
-	file, info, typeErrs, err := analyzeFile(fset, path)
+	file, info, typeErrs, err := analyzeFileWithModule(fset, path, extraGoMod)
 	if err != nil {
 		return nil, err
 	}

@@ -74,11 +74,14 @@ func TestVetFail(t *testing.T) {
 	})
 }
 
-// TestPlacedProgramRedirectsToEmu checks that a `placed par` program is
-// rejected by both `bil run` and `bil vet` with a clear redirect to
-// `bil emu` -- not vet.Check's raw, misleading "could not import
-// emulator/bilink" importer failure (see runCmd's own comment on why that
-// import can never resolve there).
+// TestPlacedProgramRedirectsToEmu checks that a `placed par` program's
+// two subcommands now behave differently, now that vet.Check can
+// actually resolve emulator/bilink (a generated go.mod + local
+// `replace`, see runCmd): `bil run` still redirects to `bil emu` --
+// a multi-processor grid program can't sensibly `go run` on one
+// machine regardless of whether it vets clean -- but `bil vet` now
+// proceeds to a real, module-aware check instead of bailing out before
+// ever trying, and reports clean for this valid placed program.
 func TestPlacedProgramRedirectsToEmu(t *testing.T) {
 	const src = "testdata/emufail/placed.bil"
 
@@ -102,14 +105,14 @@ func TestPlacedProgramRedirectsToEmu(t *testing.T) {
 	t.Run("vet", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		code := runCmd(src, false, &stdout, &stderr)
-		if code == 0 {
-			t.Fatal("runCmd(execute=false) returned 0, want non-zero")
+		if code != 0 {
+			t.Fatalf("runCmd(execute=false) = %d, want 0 (a valid placed program should now vet clean): stderr=%q", code, stderr.String())
 		}
 		if stdout.Len() != 0 {
 			t.Errorf("stdout not empty: %q", stdout.String())
 		}
-		if !strings.Contains(stderr.String(), "bil emu") {
-			t.Errorf("stderr = %q, want a `bil emu` redirect", stderr.String())
+		if stderr.Len() != 0 {
+			t.Errorf("stderr not empty, want a clean vet: %q", stderr.String())
 		}
 	})
 }

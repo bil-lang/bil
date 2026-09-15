@@ -60,24 +60,19 @@ func runCmd(src string, execute bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// A `placed par` program imports emulator/bilink, which vet.Check's
-	// go/importer ("source" mode, no Go-modules awareness) can never
-	// resolve -- not a real violation, just a hard limitation (see
-	// emuCmd's own comment on this in emu.go). Catching it here, the same
-	// way emuCmd already does via RoleBinaries, turns a confusing raw
-	// importer failure into an accurate redirect to `bil emu`, the only
-	// command that can actually run a grid-targeted program.
+	// A `placed par` program imports emulator/bilink -- vet.Check can now
+	// resolve that (a generated go.mod + local `replace`, see below), so
+	// only `bil run`'s execute path still needs to bail out here: a
+	// multi-processor grid program can't sensibly `go run` on one
+	// machine regardless of whether it vets clean. `bil vet` on the same
+	// program now proceeds to a real check instead of stopping here.
 	roles, err := bilc.RoleBinaries(src, in)
 	if err != nil {
 		fmt.Fprintln(stderr, "role split error:", err)
 		return 1
 	}
-	if roles != nil {
-		verb := "vet"
-		if execute {
-			verb = "run"
-		}
-		fmt.Fprintf(stderr, "bil: %s uses `link[...]`/`placed par` — it targets the grid emulator, not this machine. Use `bil emu` instead of `bil %s`.\n", src, verb)
+	if roles != nil && execute {
+		fmt.Fprintf(stderr, "bil: %s uses `link[...]`/`placed par` — it targets the grid emulator, not this machine. Use `bil emu` instead of `bil run`.\n", src)
 		return 1
 	}
 
@@ -97,7 +92,16 @@ func runCmd(src string, execute bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	messages, err := vet.Check(tmp.Name())
+	var extraGoMod []string
+	if roles != nil {
+		emulatorDir, err := findEmulatorDir()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		extraGoMod = []string{"require emulator v0.0.0", "replace emulator => " + emulatorDir}
+	}
+	messages, err := vet.Check(tmp.Name(), extraGoMod...)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
