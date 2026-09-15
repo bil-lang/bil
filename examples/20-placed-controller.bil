@@ -17,14 +17,14 @@
 // rather than inventing a brand-new name. `controller`/`rowEnd`/`relay`
 // below are ordinary chan/proc Bil — no `place`/`link` anywhere in
 // them — exactly the shape Example 01/02 already use, and could in
-// principle be developed and tested with real `make(chan int32)`
+// principle be developed and tested with real `make(chan int)`
 // wiring before ever being placed at all. `place` only appears in
 // `main()`, where each clause wires the proc it calls onto specific
 // links, and the `.in`/`.out` suffix says which half of that physical
 // link this is, right next to the index itself. A `chan T` parameter
 // used bidirectionally by one proc (send then receive on the same
 // physical link) becomes two separate directional parameters here
-// instead (`chan<- int32` / `<-chan int32`), each `place`d onto the
+// instead (`chan<- int` / `<-chan int`), each `place`d onto the
 // *same* link index but opposite suffix — a real Go channel can't be
 // used for both directions in one proc (see
 // checkProcChanBothDirections), so one physical, bidirectional link is
@@ -43,13 +43,13 @@ const hopDelay = 150 * time.Millisecond
 
 // controller runs at exactly one processor, (0,0): originates each
 // round's value east, then waits for it to come back reflected.
-proc controller(eastOut chan<- int32, eastIn <-chan int32) {
+proc controller(eastOut chan<- int, eastIn <-chan int) {
 	cols := bilink.NumCols()
 	bilink.Screenf("controller ready, %d cols", cols)
 	for round := range rounds {
 		time.Sleep(hopDelay)
-		eastOut <- int32(round)
-		var v int32
+		eastOut <- round
+		var v int
 		eastIn -> v
 		bilink.Screenf("round %d: reflected %d", round, v)
 	}
@@ -59,10 +59,10 @@ proc controller(eastOut chan<- int32, eastIn <-chan int32) {
 
 // rowEnd runs at (0,cols-1): the far end of row 0, receiving from the
 // west and reflecting straight back west.
-proc rowEnd(westIn <-chan int32, westOut chan<- int32) {
+proc rowEnd(westIn <-chan int, westOut chan<- int) {
 	bilink.Screenf("row-end ready")
 	for round := range rounds {
-		var v int32
+		var v int
 		westIn -> v
 		bilink.Screenf("round %d: got %d, reflecting", round, v)
 		time.Sleep(hopDelay)
@@ -75,13 +75,13 @@ proc rowEnd(westIn <-chan int32, westOut chan<- int32) {
 // relay runs on every other row-0 processor: forward east, forward
 // the reflection back west. Both the west and east links are used
 // bidirectionally, so each gets two directional parameters.
-proc relay(westIn <-chan int32, eastOut chan<- int32, eastIn <-chan int32, westOut chan<- int32) {
+proc relay(westIn <-chan int, eastOut chan<- int, eastIn <-chan int, westOut chan<- int) {
 	bilink.Screenf("relay ready")
 	for range rounds {
-		var v int32
+		var v int
 		westIn -> v
 		eastOut <- v
-		var v2 int32
+		var v2 int
 		eastIn -> v2
 		westOut <- v2
 	}

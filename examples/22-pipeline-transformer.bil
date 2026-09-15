@@ -63,8 +63,8 @@
 //
 // Channels: `place NAME at link[EXPR].in`/`.out` lives in the clause
 // that calls a proc, not inside the proc's own body -- it binds one of
-// that proc's declared, typed channel parameters (`chan<- int32` for a
-// send-only direction, `<-chan int32` for receive-only) to a physical
+// that proc's declared, typed channel parameters (`chan<- int` for a
+// send-only direction, `<-chan int` for receive-only) to a physical
 // link, and the `.in`/`.out` suffix names which half of it. A proc
 // that uses one physical link for both directions (the attention row's
 // east/west links) gets two directional parameters for it, both
@@ -334,7 +334,7 @@ proc embedStage(south chan<- [dModel]float64) {
 // It gets its own column's embedded vector straight from the north
 // link, gathers every other column's vector via the row's own
 // west/east relay chain (Example 21's relay idiom, generalized from
-// one int32 per round to a whole [dModel]float64 per round), runs
+// one int per round to a whole [dModel]float64 per round), runs
 // self-attention plus the first residual connection once the whole
 // row has arrived, scatters each column's own result back out along
 // the same relay chain, then forwards its own result south to row
@@ -376,7 +376,7 @@ proc attnController(north <-chan [dModel]float64, eastIn <-chan [dModel]float64,
 // (receive east, forward west); otherwise that round isn't on its
 // path. Scatter mirrors this going back east. Once it has its own
 // final result it forwards that south to row 2. This is Example 21's
-// relay proc, generalized from one int32 per round to a whole
+// relay proc, generalized from one int per round to a whole
 // [dModel]float64 per round. Both east and west are used bidirectionally,
 // so each gets two directional parameters bound to the same link.
 proc attnRelay(north <-chan [dModel]float64, eastIn <-chan [dModel]float64, westOut chan<- [dModel]float64, westIn <-chan [dModel]float64, eastOut chan<- [dModel]float64, south chan<- [dModel]float64) {

@@ -12,7 +12,7 @@
 // single reflected counter, they're one whole row's worth of input
 // tokens flowing *in* to the controller, and that many predicted
 // tokens flowing back *out* -- real data traversing the physical link
-// fabric one int32 at a time, feeding a real (if tiny and untrained)
+// fabric one int at a time, feeding a real (if tiny and untrained)
 // transformer encoder block: embedding + sinusoidal positional
 // encoding, scaled dot-product self-attention, a residual connection,
 // a feed-forward layer, a second residual, an output projection and
@@ -280,7 +280,7 @@ func runTransformer(tokens []int) []int {
 // controller runs at exactly one processor, (0,0): gathers every row-0
 // column's token, runs the transformer block once the whole row has
 // arrived, then scatters each column's prediction back out.
-proc controller(eastOut chan<- int32, eastIn <-chan int32) {
+proc controller(eastOut chan<- int, eastIn <-chan int) {
 	cols := bilink.NumCols()
 	bilink.Screenf("controller ready, %d cols", cols)
 
@@ -290,16 +290,16 @@ proc controller(eastOut chan<- int32, eastIn <-chan int32) {
 
 		for r := cols - 1; r >= 1; r-- {
 			time.Sleep(hopDelay)
-			var v int32
+			var v int
 			eastIn -> v
-			tokens[r] = int(v)
+			tokens[r] = v
 		}
 
 		predicted := runTransformer(tokens)
 
 		for s := 1; s < cols; s++ {
 			time.Sleep(hopDelay)
-			eastOut <- int32(predicted[s])
+			eastOut <- predicted[s]
 		}
 
 		bilink.Screenf("gen %d: in=%q out=%q", gen, wordAt(tokens[0]), wordAt(predicted[0]))
@@ -314,18 +314,18 @@ proc controller(eastOut chan<- int32, eastIn <-chan int32) {
 // destination for exactly one scatter round -- everything else about
 // gather/scatter happens strictly west of it, so unlike relay it
 // needs no round loop at all.
-proc rowEnd(westOut chan<- int32, westIn <-chan int32) {
+proc rowEnd(westOut chan<- int, westIn <-chan int) {
 	c := bilink.NumCols() - 1
 	bilink.Screenf("row-end ready at col %d", c)
 
 	for gen := range generations {
 		myTok := (c + gen) % vocabSize
 		time.Sleep(hopDelay)
-		westOut <- int32(myTok)
+		westOut <- myTok
 
-		var predicted int32
+		var predicted int
 		westIn -> predicted
-		bilink.Screenf("gen %d: %q -> %q", gen, wordAt(myTok), wordAt(int(predicted)))
+		bilink.Screenf("gen %d: %q -> %q", gen, wordAt(myTok), wordAt(predicted))
 	}
 
 	bilink.Screenf("row-end done")
@@ -340,7 +340,7 @@ proc rowEnd(westOut chan<- int32, westIn <-chan int32) {
 // just run `cols-1` times per generation instead of once. Both
 // physical links (east, west) are used in both directions across the
 // two phases, so each becomes a pair of directional parameters.
-proc relay(eastIn <-chan int32, westOut chan<- int32, westIn <-chan int32, eastOut chan<- int32) {
+proc relay(eastIn <-chan int, westOut chan<- int, westIn <-chan int, eastOut chan<- int) {
 	cols := bilink.NumCols()
 	c := bilink.Col()
 	bilink.Screenf("relay ready at col %d", c)
@@ -352,30 +352,30 @@ proc relay(eastIn <-chan int32, westOut chan<- int32, westIn <-chan int32, eastO
 			switch {
 			case r == c:
 				time.Sleep(hopDelay)
-				westOut <- int32(myTok)
+				westOut <- myTok
 			case r > c:
-				var v int32
+				var v int
 				eastIn -> v
 				time.Sleep(hopDelay)
 				westOut <- v
 			}
 		}
 
-		var predicted int32
+		var predicted int
 
 		for s := 1; s < cols; s++ {
 			switch {
 			case s == c:
 				westIn -> predicted
 			case s > c:
-				var v int32
+				var v int
 				westIn -> v
 				time.Sleep(hopDelay)
 				eastOut <- v
 			}
 		}
 
-		bilink.Screenf("gen %d: %q -> %q", gen, wordAt(myTok), wordAt(int(predicted)))
+		bilink.Screenf("gen %d: %q -> %q", gen, wordAt(myTok), wordAt(predicted))
 	}
 
 	bilink.Screenf("relay done")

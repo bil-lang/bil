@@ -53,12 +53,12 @@ const blockSize = 64
 // sink runs at column 0: the row's west end, so it has nowhere further
 // west to relay a running total to -- it reports the row's grand total
 // and achieved throughput instead.
-proc sink(eastIn <-chan int32) {
+proc sink(eastIn <-chan int) {
 	bilink.Screenf("sink ready, %d cols, %ds budget", bilink.NumCols(), budgetSeconds)
 	ops := runKernel()
 	total := ops
 	if bilink.LinkWired(1) {
-		var fromEast int32
+		var fromEast int
 		eastIn -> fromEast
 		total += fromEast
 	}
@@ -71,12 +71,12 @@ proc sink(eastIn <-chan int32) {
 // the columns further east have already summed (if this isn't the row's
 // last column -- bilink.LinkWired(1) is false there), and relays the
 // running total one hop west toward the sink.
-proc worker(eastIn <-chan int32, westOut chan<- int32) {
+proc worker(eastIn <-chan int, westOut chan<- int) {
 	bilink.Screenf("worker ready at col %d", bilink.Col())
 	ops := runKernel()
 	total := ops
 	if bilink.LinkWired(1) {
-		var fromEast int32
+		var fromEast int
 		eastIn -> fromEast
 		total += fromEast
 	}
@@ -89,7 +89,7 @@ proc worker(eastIn <-chan int32, westOut chan<- int32) {
 // block-multiplies it completed. Swapping the result back in as the next
 // iteration's input (rather than recomputing the same fixed A*B every
 // time) keeps every iteration doing real, distinct floating-point work.
-func runKernel() int32 {
+func runKernel() int {
 	var a, b, c [blockSize][blockSize]float64
 	for i := 0; i < blockSize; i++ {
 		for j := 0; j < blockSize; j++ {
@@ -99,7 +99,7 @@ func runKernel() int32 {
 	}
 
 	deadline := time.Now().Add(budgetSeconds * time.Second)
-	var ops int32
+	var ops int
 	for time.Now().Before(deadline) {
 		for i := 0; i < blockSize; i++ {
 			for j := 0; j < blockSize; j++ {

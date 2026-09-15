@@ -6,7 +6,7 @@
 // (../../emulator, a sibling repo — see its README and STRATEGY.md's
 // "Emulator architecture" note): the exact same controller/relay/rowEnd
 // row-0 topology as Example 20 (placed-controller), but where Example 20
-// relays a single bare int32 round-trip, this one relays two real
+// relays a single bare int round-trip, this one relays two real
 // protocol types — Cmd going east, Result coming back west — each a
 // closed tagged union (the same marker-method idiom Example 5's own
 // non-placed LogMsg channel already uses), not a hand-packed integer.
@@ -22,7 +22,7 @@
 // `relay` never inspects a Cmd or Result's variant at all — it declares
 // its own four parameters as the plain interface types and forwards
 // whatever it received, unexamined, exactly like Example 20's relay
-// forwards its int32 unexamined. Only `controller` (which builds each
+// forwards its int unexamined. Only `controller` (which builds each
 // Cmd and interprets each Result) and `actuator` (the reverse) ever
 // type-switch on them — and both do it with a plain two-step `chan ->
 // v` followed by an ordinary Go `switch v := v.(type)`, not the fused

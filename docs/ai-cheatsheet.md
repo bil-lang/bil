@@ -374,7 +374,7 @@ func main() {
 
 `placed par`/`processor(...)`/`place` are a separate, optional layer on top of everything above — only relevant when the program targets Bil's WASM-worker grid emulator (a real NxM array of nodes, each its own isolated Worker wired to its 4 nearest neighbours by physical links), not for an ordinary single-machine Bil program. Rules specific to this layer, easy to get wrong:
 
-- **Physical links carry `int32` only.** `place` rewrites every send/receive on that name straight to `bilink.Send(idx, v int32)`/`bilink.Recv(idx) int32` — hardcoded, not generic. A placed channel's element type must be exactly `int32`; a struct, string, or protocol/tagged-union type (pattern 4 above) can't cross a physical link directly. To move anything wider, encode it yourself as a sequence of `int32` words (e.g. `int32(math.Float32bits(float32(x)))` for a float) and reassemble on the receiving end in the same fixed order — there's no automatic marshaling.
+- **A placed channel's element type isn't limited to `int32`.** Physical links move one `int32` word (`bilink.Send(idx, v int32)`/`bilink.Recv(idx) int32`) at a time under the hood, but `place` now auto-generates the encode/decode sequence for any of: a bare `int`/`int32`/`bool`/`float32`/`float64`; a struct or fixed-size array of those, nested arbitrarily deep; or a tagged-union interface (the same marker-method idiom as pattern 4 above) whose implementing variants are themselves structs of those — `cmdOut <- cmd`/`cmdIn -> cmd` just works, no manual marshaling. Still unsupported: `string`, a slice, a map, a pointer, a `chan`/`func` field, and a self-referential struct — bilc rejects these with a clear error naming the offending type, rather than a confusing downstream Go compile error.
 - **A placed channel's receive must use `->`, never `:->`.** The declare form isn't supported for a `place`-bound name — using it silently falls through to an ordinary (and here, nil) Go channel receive, which compiles but blocks forever at runtime rather than erroring. Declare the variable with `var` first, same as any other assign-form receive.
 - **Every channel parameter of a placed-called proc needs an explicit direction** (`<-chan T`/`chan<- T`, never a bare `chan T`) and **must be bound by exactly one `place` statement** in the clause that calls it.
 - **A proc may be placed-called from at most one clause** in the whole `placed par` block — no reusing one proc as two different roles.
@@ -398,33 +398,33 @@ package main
 
 const waves = 3
 
-proc origin(eastOut chan<- int32, eastIn <-chan int32) {
+proc origin(eastOut chan<- int, eastIn <-chan int) {
 	if bilink.NumCols() < 2 {
 		stop
 	}
 	for wave := range waves {
-		eastOut <- int32(wave)
+		eastOut <- wave
 		eastIn -> _
 	}
 	stop
 }
 
-proc reflect(westIn <-chan int32, westOut chan<- int32) {
+proc reflect(westIn <-chan int, westOut chan<- int) {
 	for wave := range waves {
-		var v int32
+		var v int
 		westIn -> v
 		westOut <- v
 	}
 	stop
 }
 
-proc relay(westIn, eastIn <-chan int32, eastOut, westOut chan<- int32) {
+proc relay(westIn, eastIn <-chan int, eastOut, westOut chan<- int) {
 	for wave := range waves {
-		var v int32
+		var v int
 		westIn -> v
 		eastOut <- v
 
-		var v2 int32
+		var v2 int
 		eastIn -> v2
 		westOut <- v2
 	}
