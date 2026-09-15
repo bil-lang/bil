@@ -997,6 +997,163 @@ func main() {
 	}
 }
 
+// TestPlacedVarWriteDirect checks that a placed-called proc writing
+// directly to a package-level var, in its own body, is rejected.
+func TestPlacedVarWriteDirect(t *testing.T) {
+	src := []byte(`package main
+
+var counter = 0
+
+proc worker() {
+	counter = counter + 1
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			worker()
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error for a placed proc writing a package-level var, got none")
+	}
+	if !strings.Contains(err.Error(), `writes to package-level var "counter"`) {
+		t.Errorf("error = %q, want it to name the offending var", err.Error())
+	}
+}
+
+// TestPlacedVarWriteViaHelper checks that a write reached only
+// indirectly -- through a same-file helper function the placed proc
+// calls, never referencing the var directly itself -- is still caught.
+// This mirrors examples/21-mesh-transformer.bil's real shape, where
+// every placed proc reaches its shared package vars only through a
+// helper like wordAt/runAttention, never directly.
+func TestPlacedVarWriteViaHelper(t *testing.T) {
+	src := []byte(`package main
+
+var total int
+
+func bump(n int) int {
+	total = total + n
+	return total
+}
+
+proc worker() {
+	bilink.Screenf("%d", bump(1))
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			worker()
+		}
+	}
+}
+`)
+	_, err := Transform("test.bil", src)
+	if err == nil {
+		t.Fatal("expected an error for a write reached via a same-file helper, got none")
+	}
+	if !strings.Contains(err.Error(), `writes to package-level var "total"`) {
+		t.Errorf("error = %q, want it to name the offending var", err.Error())
+	}
+}
+
+// TestPlacedVarReadOnlyFromSeveralRoles confirms the real, intentional
+// pattern every current example already relies on keeps working: a
+// package-level var read (never written) from more than one distinct
+// placed-called proc, several of them only indirectly via a shared
+// helper -- exactly examples/21-mesh-transformer.bil's own vocab/wordAt
+// shape. Must NOT be flagged.
+func TestPlacedVarReadOnlyFromSeveralRoles(t *testing.T) {
+	src := []byte(`package main
+
+var vocab = [4]string{"the", "cat", "sat", "mat"}
+
+func wordAt(tok int) string { return vocab[tok%4] }
+
+proc controller() {
+	bilink.Screenf("%s", wordAt(0))
+}
+
+proc rowEnd() {
+	bilink.Screenf("%s", wordAt(1))
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			controller()
+		}
+		processor(1) {
+			rowEnd()
+		}
+	}
+}
+`)
+	if _, err := Transform("test.bil", src); err != nil {
+		t.Fatalf("Transform: %v (a var read-only from multiple placed procs via a shared helper must be permitted)", err)
+	}
+}
+
+// TestPlacedVarShadowedLocalNotFlagged confirms a local variable that
+// shadows a package-level var's name is unrestricted -- assigning to it
+// is an ordinary local mutation, not a write to the outer var.
+func TestPlacedVarShadowedLocalNotFlagged(t *testing.T) {
+	src := []byte(`package main
+
+var total int
+
+proc worker() {
+	total := 5
+	total = total + 1
+	bilink.Screenf("%d", total)
+}
+
+func main() {
+	placed par {
+		processor(0) {
+			worker()
+		}
+	}
+}
+`)
+	if _, err := Transform("test.bil", src); err != nil {
+		t.Fatalf("Transform: %v (a local variable shadowing a package-level var's name must not be flagged)", err)
+	}
+}
+
+// TestPlacedVarUntouchedByPlacedProcNotFlagged confirms a package-level
+// var mutated only by ordinary (non-placed) code -- main(), or a
+// func/proc never placed-called -- is completely unaffected by this
+// check, which only ever looks at a placed-called proc's own reachable
+// code.
+func TestPlacedVarUntouchedByPlacedProcNotFlagged(t *testing.T) {
+	src := []byte(`package main
+
+var seen = 0
+
+proc worker() {
+	bilink.Screenf("ready")
+}
+
+func main() {
+	seen = seen + 1
+	placed par {
+		processor(0) {
+			worker()
+		}
+	}
+}
+`)
+	if _, err := Transform("test.bil", src); err != nil {
+		t.Fatalf("Transform: %v (a var untouched by any placed proc must not be flagged)", err)
+	}
+}
+
 // TestRoleBinaries checks that RoleBinaries emits one standalone,
 // syntactically valid Go file per distinct placed-par role, each with
 // its own main() calling only that role's proc -- and that every

@@ -13,6 +13,7 @@ import (
 	"go/scanner"
 	"go/token"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -281,6 +282,14 @@ type transformer struct {
 	// one role's call in main(), the same dead-code elimination that
 	// today's single switch statement (referencing every role) prevents.
 	roleOverride string
+
+	// placedCallees is every distinct proc name placed-called anywhere in
+	// the file, populated as a side effect of collectPlacedCallSites's own
+	// walk (it already builds this exact set locally, as placedElsewhere,
+	// to reject placed-calling the same proc from two clauses) --
+	// checkPlacedVarsReadOnly reuses it directly rather than re-deriving
+	// the same set with a second walk of every placed par block.
+	placedCallees map[string]bool
 }
 
 // placeAliasScope is one proc/func body's `place`-alias table: NAME ->
@@ -2083,6 +2092,49 @@ func (t *transformer) collectTopLevelConstNames() map[string]bool {
 	return names
 }
 
+// collectTopLevelVarNames returns every package-level `var NAME [TYPE] [=
+// EXPR]` or grouped `var ( NAME ... ... )` identifier, declared outside any
+// proc/func body — the exact same token-scan as collectTopLevelConstNames,
+// just keyed on token.VAR instead of token.CONST (a var spec's grouped-form
+// shape is identical to a const spec's for the purpose of just finding
+// names, whether or not it carries a `= EXPR`). Used by
+// checkPlacedVarsReadOnly to know which identifiers are package-level vars
+// at all, as opposed to a proc's own locals. Multi-name comma declarations
+// (`var a, b = 1, 2`) are not collected; unsupported, and unused by any
+// example in this codebase, same as collectTopLevelConstNames.
+func (t *transformer) collectTopLevelVarNames() map[string]bool {
+	names := map[string]bool{}
+	bodies := t.collectFuncBodyRanges()
+	inBody := func(i int) bool {
+		for _, br := range bodies {
+			if i >= br.bodyLo && i < br.bodyHi {
+				return true
+			}
+		}
+		return false
+	}
+	for i := 0; i+1 < len(t.toks); i++ {
+		if t.toks[i].tok != token.VAR || inBody(i) {
+			continue
+		}
+		j := i + 1
+		if j < len(t.toks) && t.toks[j].tok == token.LPAREN {
+			close := matchParen(t.toks, j)
+			for k := j + 1; k < close; k++ {
+				if t.toks[k].tok == token.IDENT &&
+					(t.toks[k-1].tok == token.LPAREN || t.toks[k-1].tok == token.SEMICOLON) {
+					names[t.toks[k].lit] = true
+				}
+			}
+			continue
+		}
+		if j < len(t.toks) && t.toks[j].tok == token.IDENT {
+			names[t.toks[j].lit] = true
+		}
+	}
+	return names
+}
+
 // isConstExpr reports whether token range [lo,hi) is (conservatively) a
 // compile-time constant expression: every token must be a literal
 // (INT/FLOAT/IMAG/CHAR/STRING), one of the arithmetic/bitwise operators or
@@ -2360,6 +2412,10 @@ func (t *transformer) collectPlacedCallSites() error {
 			return fmt.Errorf("%s: proc %q is placed-called more than once (already placed-called at %s); a proc may be placed-called from at most one clause in a placed par block", t.file.Position(callPos), callee, t.file.Position(prevPos))
 		}
 		placedElsewhere[callee] = callPos
+		if t.placedCallees == nil {
+			t.placedCallees = map[string]bool{}
+		}
+		t.placedCallees[callee] = true
 
 		if len(aliases) > 0 {
 			t.placeAliases = append(t.placeAliases, placeAliasScope{bodyLo: br.bodyLo, bodyHi: br.bodyHi, aliases: aliases})
@@ -2385,6 +2441,206 @@ func (t *transformer) collectPlacedCallSites() error {
 		}
 	}
 	return nil
+}
+
+// checkPlacedVarsReadOnly rejects a package-level `var` written anywhere
+// within a placed-called proc's own reachable code -- its own body, plus
+// any same-file top-level proc/func it calls, recursively.
+//
+// Unlike an ordinary `par` branch (a goroutine sharing one process's
+// heap with its siblings, where tools/vet's CheckSharedVariables permits
+// read-only sharing and only rejects a write touched elsewhere), a
+// placed-called proc runs as its own genuinely separate OS process or
+// Worker (see RoleBinaries: each distinct role becomes a fully
+// independent, standalone Go source with every package-level
+// declaration copied verbatim -- no Go-level symbol sharing between
+// roles at all). A write to a package-level var there isn't a data race
+// -- there's no concurrent access to race on -- it's a silent logic bug:
+// the write only ever lands in that one process's own private copy, so
+// nothing outside it (not even another instance of the very same
+// wildcarded proc, running as its own separate process) can ever
+// observe it. That failure mode is invisible to Go's compiler and to
+// the race detector alike, so bilc rejects it outright at compile time
+// instead: every reachable outer-scope var is read-only, full stop --
+// simpler to state, simpler to check, and it costs nothing real, since
+// state private to one placed proc belongs in a local variable anyway
+// (every real example already follows this: Example 21/22's weight
+// matrices and Example 24's `cmds` are read-only package vars, several
+// read from more than one placed role).
+//
+// This is a token-level heuristic, not a sound one -- consistent with
+// this file's other body-scanning checks (checkProcChanBothDirections's
+// own doc comment admits the same kind of gap):
+//   - No real scoping: a local variable that shadows a package-level
+//     var's name is deliberately exempted (see shadowedNames below), but
+//     shadowing introduced any other way (e.g. a for-loop variable) isn't
+//     specially detected.
+//   - No alias tracking: a write reached through a pointer alias
+//     (`p := &globalVar; *p = 5`) isn't recognized as a write.
+//   - Interprocedural recursion only follows a same-file, name-matched
+//     call (`helper(...)` where helper is a top-level proc/func) --
+//     never a call through a function value, closure, or interface
+//     method.
+//   - Doesn't catch a package-level *channel* var touched only by sends
+//     (or only by receives) from more than one placed proc -- a
+//     guaranteed hang, but neither operation is a plain assignment, so
+//     it doesn't trip the write-detector below at all.
+func (t *transformer) checkPlacedVarsReadOnly() error {
+	varNames := t.collectTopLevelVarNames()
+	if len(varNames) == 0 || len(t.placedCallees) == 0 {
+		return nil
+	}
+	allBodies := map[string]funcBodyRange{}
+	for _, br := range t.collectAllFuncBodyRanges() {
+		allBodies[br.name] = br
+	}
+
+	calleeNames := make([]string, 0, len(t.placedCallees))
+	for name := range t.placedCallees {
+		calleeNames = append(calleeNames, name)
+	}
+	sort.Strings(calleeNames) // deterministic error ordering
+
+	for _, callee := range calleeNames {
+		reachable := t.reachableBodyRanges(callee, allBodies)
+		if pos, name, ok := t.findWriteToVar(reachable, varNames); ok {
+			return fmt.Errorf("%s: placed proc %q writes to package-level var %q -- every var a placed proc's reachable code touches is read-only (it runs in its own separate process, so a write here is never visible anywhere else; give %q's own private state a local variable instead)", t.file.Position(pos), callee, name, callee)
+		}
+	}
+	return nil
+}
+
+// reachableBodyRanges returns rootName's own body range plus every
+// same-file top-level proc/func's body range reachable from it by a
+// chain of ordinary calls, found by scanning each newly-reached body's
+// own tokens for an IDENT matching a name in allBodies immediately
+// followed by `(`. visited guards against infinite recursion on a
+// mutual- or self-recursive call chain, the same "seen set" pattern
+// resolveTypeShape already uses for a self-referential struct.
+func (t *transformer) reachableBodyRanges(rootName string, allBodies map[string]funcBodyRange) []funcBodyRange {
+	var ranges []funcBodyRange
+	visited := map[string]bool{}
+	var visit func(name string)
+	visit = func(name string) {
+		if visited[name] {
+			return
+		}
+		visited[name] = true
+		br, ok := allBodies[name]
+		if !ok {
+			return
+		}
+		ranges = append(ranges, br)
+		for i := br.bodyLo; i < br.bodyHi-1; i++ {
+			if t.toks[i].tok == token.IDENT && t.toks[i+1].tok == token.LPAREN {
+				if _, isFunc := allBodies[t.toks[i].lit]; isFunc {
+					visit(t.toks[i].lit)
+				}
+			}
+		}
+	}
+	visit(rootName)
+	return ranges
+}
+
+// findWriteToVar scans every range in reachable for a write-shaped
+// token sequence -- IDENT immediately followed by an assignment
+// operator (`=`, `+=`, ...; never `:=`, which introduces a new local,
+// not a write to an outer one) or by `++`/`--`, or immediately preceded
+// by `&` (address-of, a conservative write -- a later mutation through
+// the resulting pointer would otherwise be invisible to this scan) --
+// matching a name in varNames. An identifier that's also locally
+// declared somewhere in the same range (via `var NAME` or `NAME :=`)
+// before the point in question is skipped: it shadows the package-level
+// var of the same name, so a write to it isn't a write to the outer one
+// -- see this function's own doc comment on checkPlacedVarsReadOnly for
+// why this is a heuristic, not a sound scope resolver.
+func (t *transformer) findWriteToVar(reachable []funcBodyRange, varNames map[string]bool) (pos token.Pos, name string, found bool) {
+	isAssignOp := func(tk token.Token) bool {
+		switch tk {
+		case token.ASSIGN, token.ADD_ASSIGN, token.SUB_ASSIGN, token.MUL_ASSIGN,
+			token.QUO_ASSIGN, token.REM_ASSIGN, token.AND_ASSIGN, token.OR_ASSIGN,
+			token.XOR_ASSIGN, token.SHL_ASSIGN, token.SHR_ASSIGN, token.AND_NOT_ASSIGN:
+			return true
+		}
+		return false
+	}
+	for _, br := range reachable {
+		shadowed := map[string]bool{}
+		for i := br.bodyLo; i < br.bodyHi; i++ {
+			tk := t.toks[i]
+			if tk.tok != token.IDENT || !varNames[tk.lit] {
+				continue
+			}
+			// A local declaration of the same name shadows the
+			// package-level var from here on, within this one range.
+			isLocalDecl := (i > br.bodyLo && t.toks[i-1].tok == token.VAR) ||
+				(i+1 < br.bodyHi && t.toks[i+1].tok == token.DEFINE)
+			if isLocalDecl {
+				shadowed[tk.lit] = true
+				continue
+			}
+			if shadowed[tk.lit] {
+				continue
+			}
+			isWrite := (i > br.bodyLo && t.toks[i-1].tok == token.AND) ||
+				(i+1 < br.bodyHi && (isAssignOp(t.toks[i+1].tok) || t.toks[i+1].tok == token.INC || t.toks[i+1].tok == token.DEC))
+			if isWrite {
+				return tk.pos, tk.lit, true
+			}
+		}
+	}
+	return 0, "", false
+}
+
+// collectAllFuncBodyRanges is like collectFuncBodyRanges, but doesn't
+// skip a declaration with a return type between its parameter list and
+// body -- checkPlacedVarsReadOnly needs every top-level proc/func's
+// body range, including an ordinary helper like `wordAt(tok int)
+// string`, which collectFuncBodyRanges's place-alias-only purpose never
+// needed to look inside. The return-type region (a bare type, a
+// pointer/array/slice/map type, a qualified pkg.Type, or a
+// parenthesized multi-value tuple) is skipped by tracking paren/bracket
+// depth until the first `{` at depth zero -- good enough for every real
+// shape in this codebase, not an attempt to parse the full Go type
+// grammar. An inline `struct{...}`/`interface{...}` return type would
+// confuse this (its own `{` would look like the body open) -- no
+// example uses one, so this stays unhandled rather than solved
+// speculatively.
+func (t *transformer) collectAllFuncBodyRanges() (ranges []funcBodyRange) {
+	toks := t.toks
+	for i := 0; i+2 < len(toks); i++ {
+		isProc := toks[i].tok == token.IDENT && toks[i].lit == "proc"
+		if !isProc && toks[i].tok != token.FUNC {
+			continue
+		}
+		if toks[i+1].tok != token.IDENT || toks[i+2].tok != token.LPAREN {
+			continue
+		}
+		parenClose := matchParen(toks, i+2)
+		j := parenClose + 1
+		depth := 0
+	skipReturnType:
+		for j < len(toks) {
+			switch toks[j].tok {
+			case token.LPAREN, token.LBRACK:
+				depth++
+			case token.RPAREN, token.RBRACK:
+				depth--
+			case token.LBRACE:
+				if depth == 0 {
+					break skipReturnType
+				}
+			}
+			j++
+		}
+		if j >= len(toks) || toks[j].tok != token.LBRACE {
+			continue
+		}
+		bodyClose := matchBrace(toks, j)
+		ranges = append(ranges, funcBodyRange{name: toks[i+1].lit, paramsLo: i + 3, paramsHi: parenClose, bodyLo: j + 1, bodyHi: bodyClose})
+	}
+	return ranges
 }
 
 // checkNoNestedPlacedPar rejects a placed par block that appears
@@ -3876,6 +4132,9 @@ func transformSource(filename string, src []byte, roleOverride string) ([]byte, 
 		return nil, err
 	}
 	if err := t.collectPlacedCallSites(); err != nil {
+		return nil, err
+	}
+	if err := t.checkPlacedVarsReadOnly(); err != nil {
 		return nil, err
 	}
 	body := t.transform(0, len(t.toks)-1) // exclude EOF sentinel
