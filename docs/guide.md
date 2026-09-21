@@ -4,7 +4,7 @@
 
 ## Overview
 
-**Bil**: a variant of Go for parallel processor systems.
+**Bil**: an extension to Go for parallel processor systems.
 
 Bil and Go both have concurrency models that are heavily inspired by Hoare’s CSP.
 
@@ -1116,7 +1116,7 @@ but extends it with:
 
 #### Similarities
 
-Bil is a variant of Go, adjusting the concurrency model, but otherwise incorporating Go modern and popular syntax and features. Bil extends and integrates with the standard Go toolchain. Bil itself is coded in Go. 
+Bil is an extension to Go, adjusting the concurrency model, but otherwise incorporating Go modern and popular syntax and features. Bil extends and integrates with the standard Go toolchain. Bil itself is coded in Go. 
 
 Bil adds the following tools:
 
