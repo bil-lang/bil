@@ -1,6 +1,6 @@
 # Bil
 
-**Bil** is a variant of Go that adds language and runtime support for parallel processors, see [`docs/guide.md`](https://github.com/bil-lang/bil/blob/main/docs/guide.md) for an introduction to the Bil language, expressed as worked examples.
+**Bil** is an extension to Go that adds language and runtime support for parallel processors, see [`docs/guide.md`](https://github.com/bil-lang/bil/blob/main/docs/guide.md) for an introduction to the Bil language, expressed as worked examples.
 
 ## Install
 

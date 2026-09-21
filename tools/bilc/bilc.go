@@ -3881,6 +3881,24 @@ func (t *transformer) checkNoGoStatement() error {
 	return nil
 }
 
+// checkNoSelectStatement rejects bare `select` statements — `alt`/`pri alt`
+// are the only supported CSP wait-on-multiple-channels constructs, and both
+// desugar to `select` themselves during transform. `alt` deliberately only
+// supports input guards (see docs/guide.md's buffer-process example), and
+// letting a raw `select` through — output guards included — would be a
+// silent side door around that discipline, invisible to `tools/vet` since
+// it only sees bilc's already-transformed output, where a legitimate
+// `alt`-generated `select` is indistinguishable from a hand-written one.
+func (t *transformer) checkNoSelectStatement() error {
+	for _, tk := range t.toks {
+		if tk.tok == token.SELECT {
+			pos := t.file.Position(tk.pos)
+			return fmt.Errorf("%s: bare `select` not allowed; use `alt` or `pri alt` instead", pos)
+		}
+	}
+	return nil
+}
+
 // checkNoPointerChannels rejects channel types whose element type is a
 // pointer (`chan *T`, `chan<- *T`, `<-chan *T`), wherever they appear
 // (make(), proc/func params, var decls) — a pointer sent over a channel
@@ -4114,6 +4132,9 @@ func transformSource(filename string, src []byte, roleOverride string) ([]byte, 
 		}
 	}
 	if err := t.checkNoGoStatement(); err != nil {
+		return nil, err
+	}
+	if err := t.checkNoSelectStatement(); err != nil {
 		return nil, err
 	}
 	if err := t.checkNoPointerChannels(); err != nil {

@@ -13,7 +13,7 @@ Go is a general-purpose language that borrows CSP’s channel-and-process ideas 
 Bil is a special-purpose language for parallel processor systems; influenced by CSP, by Go and by May's occam. Built on the Go toolchain, it constrains and shapes the Go concurrency model to encourage a higher level of discipline as needed by parallel systems. Bil helps coders to reason about their process models and to selectively place processes on to physical processors.
 
 ```mermaid
-flowchart LR
+flowchart TD
     CSP["CSP<br/>Hoare, 1978/85"]
     Newsqueak["Newsqueak<br/>Pike"]
     Go["Go<br/>2009"]
@@ -821,7 +821,7 @@ An alias for Go's `func` to indicate a code unit that is intended to be run as a
 
 ##### `alt`
 
-Waits on whichever of several channel operations becomes ready first, then runs that one branch — occam's `ALT`, rewritten to Go's `select`. Guards read left-to-right (`chan -> target { body }` or `chan :-> target { body }`, echoing occam's `chan ? x`) rather than Go's `case x := <-chan:`; a `(cond) &&` prefix gives a conditional guard, and `VAR := range EXPR {...}` gives the replicated form (one process listening across a runtime-sized set of channels, via `altN`). The bind target's `->`/`:->` choice (see `##### chan ->` above) is the same in every one of these shapes — plain, conditional, or replicated — including the replicated form, where only `VAR` (the winning replica index) is always fresh; that's a property of `altN`'s runtime dispatch, not of which arrow the bind target uses.
+Waits on whichever of several channel operations becomes ready first, then runs that one branch — occam's `ALT`, rewritten to Go's `select`. Guards read left-to-right (`chan -> target { body }` or `chan :-> target { body }`, echoing occam's `chan ? x`) rather than Go's `case x := <-chan:`; a `(cond) &&` prefix gives a conditional guard, and `VAR := range EXPR {...}` gives the replicated form (one process listening across a runtime-sized set of channels, via `altN`). The bind target's `->`/`:->` choice (see `##### chan ->` above) is the same in every one of these shapes — plain, conditional, or replicated — including the replicated form, where only `VAR` (the winning replica index) is always fresh; that's a property of `altN`'s runtime dispatch, not of which arrow the bind target uses. A bare `select` is rejected at compile time — `alt`/`pri alt` are the only supported forms, since they enforce the input-guard-only discipline (see the buffer-process example below) that a hand-written `select` could otherwise slip past.
 
 ##### `pri alt`
 
