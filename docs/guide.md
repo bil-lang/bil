@@ -13,7 +13,7 @@ Go is a general-purpose language that borrows CSP’s channel-and-process ideas 
 Bil is a special-purpose language for parallel processor systems; influenced by CSP, by Go and by May's occam. Built on the Go toolchain, it constrains and shapes the Go concurrency model to encourage a higher level of discipline as needed by parallel systems. Bil helps coders to reason about their process models and to selectively place processes on to physical processors.
 
 ```mermaid
-flowchart LR
+flowchart TD
     CSP["CSP<br/>Hoare, 1978/85"]
     Newsqueak["Newsqueak<br/>Pike"]
     Go["Go<br/>2009"]
