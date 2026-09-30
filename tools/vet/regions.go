@@ -251,7 +251,13 @@ func (lc *linCtx) isNonNeg(t term) bool {
 func linearize(expr ast.Expr, lc *linCtx) linExpr {
 	expr = unparenExpr(expr)
 
-	if tv, ok := lc.info.Types[expr]; ok && tv.Value != nil {
+	// constant.Int64Val's docs say it's only meaningful for an Int (or
+	// Unknown) constant.Value; on a String/Bool/Float/etc. one (e.g. a
+	// format-string argument threaded through here by the same-file-callee
+	// recursion below, treating every scalar parameter as a potential
+	// index expression regardless of its actual type) it panics rather
+	// than returning ok == false, so the Kind check must come first.
+	if tv, ok := lc.info.Types[expr]; ok && tv.Value != nil && tv.Value.Kind() == constant.Int {
 		if k, ok := constant.Int64Val(tv.Value); ok {
 			return constLin(k)
 		}
