@@ -19,10 +19,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	out, err := bilc.Transform(os.Args[1], src)
+	out, warnings, err := bilc.TransformWithWarnings(os.Args[1], src)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "transform error:", err)
 		os.Exit(1)
+	}
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
 	if err := os.WriteFile(os.Args[2], out, 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, err)

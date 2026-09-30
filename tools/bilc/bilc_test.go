@@ -1656,3 +1656,144 @@ func main() {
 // bilc's own point-to-point channel check has been removed entirely; the
 // exemption is tested where the rule itself now lives, at
 // tools/vet/testdata/chan_timer_multi_recv.go.
+
+// TestReplicatedAltConstArityAvoidsReflect checks that a replicated alt
+// whose range expression is a compile-time constant (a bare int literal or
+// a package-level const) compiles without pulling in "reflect"/altN at all
+// — testdata/ok/alt-replicated*.bil (everything except -nonconst) already
+// pins the *behavioral* side of this via golden-output comparison, but
+// none of those assert what this test does: that the reflect-based path
+// was actually avoided, which is the entire point of constArity/
+// emitReplicatedAltConst (tinygo doesn't implement reflect.Select at all).
+func TestReplicatedAltConstArityAvoidsReflect(t *testing.T) {
+	src := []byte(`package main
+
+const n = 3
+
+proc sender(b chan<- int) {
+	b <- 42
+}
+
+func main() {
+	a := make(chan int)
+	b := make(chan int)
+	c := make(chan int)
+	chans := []chan int{a, b, c}
+	par {
+		sender(b)
+		seq {
+			alt j := range n {
+				chans[j] :-> v {
+					println(j, v)
+				}
+			}
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	got := string(out)
+	if strings.Contains(got, "reflect") {
+		t.Errorf("constant-arity replicated alt should not import/use reflect, got:\n%s", got)
+	}
+	if strings.Contains(got, "altN(") {
+		t.Errorf("constant-arity replicated alt should not call altN, got:\n%s", got)
+	}
+	if !strings.Contains(got, "select {") {
+		t.Errorf("expected a native `select`, got:\n%s", got)
+	}
+}
+
+// TestReplicatedAltNonConstArityWarns checks that a replicated alt whose
+// range expression is NOT a compile-time constant still falls back to
+// altN/reflect.Select (unchanged behavior) and that TransformWithWarnings
+// reports exactly one warning for it — while a constant-arity replicated
+// alt in the same file produces none. This is the one behavior addition in
+// this change: callers (bil run/vet, bilc) surface a heads-up whenever a
+// program will still need reflect.Select and so still won't run under
+// tinygo.
+func TestReplicatedAltNonConstArityWarns(t *testing.T) {
+	src := []byte(`package main
+
+const n = 3
+
+func dynamic(chans []chan int) {
+	alt j := range len(chans) {
+		chans[j] :-> v {
+			println(j, v)
+		}
+	}
+}
+
+func main() {
+	a := make(chan int)
+	b := make(chan int)
+	c := make(chan int)
+	chans := []chan int{a, b, c}
+	alt j := range n {
+		chans[j] :-> v {
+			println(j, v)
+		}
+	}
+	_ = dynamic
+}
+`)
+	out, warnings, err := TransformWithWarnings("test.bil", src)
+	if err != nil {
+		t.Fatalf("TransformWithWarnings: %v", err)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("expected exactly 1 warning (for the non-constant `range len(chans)`), got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "reflect.Select") {
+		t.Errorf("expected the warning to mention reflect.Select, got: %q", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "len(chans)") {
+		t.Errorf("expected the warning to name the non-constant range expression, got: %q", warnings[0])
+	}
+	got := string(out)
+	if !strings.Contains(got, "reflect") || !strings.Contains(got, "altN(") {
+		t.Errorf("expected the non-constant replicated alt to still fall back to altN/reflect, got:\n%s", got)
+	}
+}
+
+// TestReplicatedAltConstArityLengthMismatchPanics checks
+// emitReplicatedAltConst's defensive guard: unlike altN (which always alts
+// over the channel array's real runtime length, ignoring what the range
+// expression said), the constant-arity fast path unrolls exactly N cases,
+// so a const arity that doesn't match the array's actual length must fail
+// loudly rather than silently alt-ing over the wrong set of replicas.
+func TestReplicatedAltConstArityLengthMismatchPanics(t *testing.T) {
+	src := []byte(`package main
+
+const n = 3
+
+func main() {
+	chans := []chan int{make(chan int), make(chan int)} // only 2, not 3
+	alt j := range n {
+		chans[j] :-> v {
+			println(j, v)
+		}
+	}
+}
+`)
+	out, err := Transform("test.bil", src)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	goFile := filepath.Join(t.TempDir(), "main.go")
+	if err := os.WriteFile(goFile, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", goFile)
+	got, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected the length-mismatch guard to panic (non-zero exit), got clean exit with output:\n%s", got)
+	}
+	if !strings.Contains(string(got), "different length than its compile-time-constant range") {
+		t.Errorf("expected the length-mismatch panic message, got:\n%s", got)
+	}
+}

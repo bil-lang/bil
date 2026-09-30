@@ -54,10 +54,13 @@ func runCmd(src string, execute bool, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	out, err := bilc.Transform(src, in)
+	out, warnings, err := bilc.TransformWithWarnings(src, in)
 	if err != nil {
 		fmt.Fprintln(stderr, "transform error:", err)
 		return 1
+	}
+	for _, w := range warnings {
+		fmt.Fprintln(stderr, "warning:", w)
 	}
 
 	// A `placed par` program imports emulator/bilink -- vet.Check can now

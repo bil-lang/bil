@@ -227,6 +227,16 @@ type transformer struct {
 	usedLink      bool // set when a `link[...]` send or receive is rewritten
 	usedPlacement bool // set when a `placed par` block is rewritten
 
+	// warnings collects non-fatal, user-facing diagnostics produced during
+	// transform -- currently just constArity's fallback notice (a
+	// replicated alt whose range expression isn't a compile-time constant,
+	// so it still needs altN/reflect.Select). Returned by transformSource
+	// alongside the transformed source; Transform itself discards them
+	// (most callers, including every test in this package, don't want to
+	// deal with them), while TransformWithWarnings surfaces them to actual
+	// CLI entry points.
+	warnings []string
+
 	// placeAliases holds, per placed-callable proc, the link-index binding
 	// for each of its own channel parameters -- collected by
 	// collectPlacedCallSites (from `place NAME at link[EXPR]` statements in
@@ -1559,6 +1569,125 @@ func (t *transformer) isReplicatedAlt(lo, hi int) (varName string, exprLo, exprH
 		}
 	}
 	return varName, exprLo, exprHi, condSrc, baseSrc, bindVar, bindKind, okVar, hasOk, bodyLo, bodyHi, closeIdx, true
+}
+
+// maxReplicatedAltArity bounds constArity's fast path: emitReplicatedAltConst
+// unrolls the replicated alt's body once per replica, so an unbounded N would
+// let a single `alt VAR := range N { ... }` blow up generated code size
+// arbitrarily -- counter to the tight-memory target the rest of this package
+// (and altNHelper's own doc comment) already designs around. Above this, a
+// provably-constant arity still falls back to altN/reflect.Select rather than
+// unrolling; there's no similar bound on the runtime-dispatch path, since it
+// doesn't duplicate anything per replica.
+const maxReplicatedAltArity = 64
+
+// constArity attempts to resolve a replicated alt's `range EXPR` span
+// ([exprLo,exprHi), as returned by isReplicatedAlt) to a compile-time-known
+// replica count, so transform can emit a native N-arm `select`
+// (emitReplicatedAltConst) instead of a runtime altN/reflect.Select dispatch
+// -- see the maxReplicatedAltArity and altNHelper doc comments for why this
+// matters (tinygo doesn't implement reflect.Select at all; reflect dispatch
+// also just costs more than a native select on any target). Only a
+// single-token EXPR is considered: a bare int literal, or a bare identifier
+// resolved via the existing constIntValue (itself already handling nested
+// const references and +-*/ arithmetic -- see its own doc comment). Anything
+// else -- a call, an arithmetic expression, a variable -- isn't attempted:
+// those are exactly the cases where the replica count genuinely isn't known
+// until runtime, so altN/reflect.Select is the only correct choice. ok is
+// false for a non-constant EXPR, an unresolvable/self-referential constant, a
+// resolved value <= 0, or one exceeding maxReplicatedAltArity -- every case
+// the caller should treat identically: fall back to altN.
+func (t *transformer) constArity(exprLo, exprHi int) (n int, ok bool) {
+	if exprHi != exprLo+1 {
+		return 0, false
+	}
+	var v int
+	var err error
+	switch tk := t.toks[exprLo]; tk.tok {
+	case token.INT:
+		v, err = strconv.Atoi(tk.lit)
+	case token.IDENT:
+		v, err = t.constIntValue(tk.lit, map[string]bool{})
+	default:
+		return 0, false
+	}
+	if err != nil || v <= 0 || v > maxReplicatedAltArity {
+		return 0, false
+	}
+	return v, true
+}
+
+// emitReplicatedAltConst writes constArity's fast path for a replicated alt
+// whose range expression resolved to a compile-time-known replica count n: a
+// single native Go `select` with one literal case per replica (baseSrc[0]
+// .. baseSrc[n-1]), instead of a runtime altN/reflect.Select dispatch over
+// baseSrc's whole (runtime) length. It's a direct generalization of
+// emitAltClauses's own case-header switch and nil-channel conditional-guard
+// idiom (see that function's doc comment) from "N distinct, separately
+// hand-written channel clauses" to "N literal indices into one channel
+// array" -- and, for the guarded case, it needs its own nested `{ varName :=
+// k; ... }` scope the way emitAltClauses doesn't: condSrc (e.g. `guards[j]`)
+// may reference the replica variable, which here is a compile-time literal
+// per case rather than a real loop variable, so each guard's evaluation gets
+// its own scoped binding of it, separate from (and not read by) the case
+// body's own copy (bound the same way, for the same reason, right where the
+// body needs it).
+//
+// The leading `len(baseSrc) != n` check is this fast path's one deliberate
+// behavioral difference from altN: altN always alts over baseSrc's actual
+// runtime length, silently, regardless of what the source's range expression
+// said; unrolling exactly n cases means a mismatch between the two would
+// otherwise silently change which replicas participate, so it's turned into
+// an immediate, loud panic instead -- a plain string, so this never needs to
+// import "fmt" just to construct the message.
+func (t *transformer) emitReplicatedAltConst(out *bytes.Buffer, n int, varName, condSrc, baseSrc, bindVar string, bindKind arrowKind, okVar string, hasOk bool, bodyLo, bodyHi int) {
+	fmt.Fprintf(out, "if len(%s) != %d {\n\tpanic(\"bil: replicated alt: %s has a different length than its compile-time-constant range\")\n}\n", baseSrc, n, baseSrc)
+
+	type repl struct {
+		ch     string
+		header string
+	}
+	reps := make([]repl, n)
+	for k := 0; k < n; k++ {
+		ch := fmt.Sprintf("%s[%d]", baseSrc, k)
+		if condSrc != "" {
+			ch = fmt.Sprintf("bilGuard%d", k)
+			fmt.Fprintf(out, "%s := %s[%d]\n", ch, baseSrc, k)
+			out.WriteString("{\n")
+			if varName != "_" {
+				fmt.Fprintf(out, "%s := %d\n_ = %s\n", varName, k, varName)
+			}
+			fmt.Fprintf(out, "if !(%s) {\n\t%s = nil\n}\n", condSrc, ch)
+			out.WriteString("}\n")
+		}
+		var header string
+		switch {
+		case hasOk && bindVar == "_" && okVar == "_":
+			header = "case <-" + ch + ":"
+		case hasOk && bindKind == arrowDeclare:
+			header = "case " + bindVar + ", " + okVar + " := <-" + ch + ":"
+		case hasOk:
+			header = "case " + bindVar + ", " + okVar + " = <-" + ch + ":"
+		case bindVar == "_":
+			header = "case <-" + ch + ":"
+		case bindKind == arrowDeclare:
+			header = "case " + bindVar + " := <-" + ch + ":"
+		default:
+			header = "case " + bindVar + " = <-" + ch + ":"
+		}
+		reps[k] = repl{ch, header}
+	}
+
+	out.WriteString("select {\n")
+	for k, r := range reps {
+		out.WriteString(r.header + "\n")
+		if varName != "_" {
+			fmt.Fprintf(out, "%s := %d\n_ = %s\n", varName, k, varName)
+		}
+		out.Write(t.transform(bodyLo, bodyHi))
+		out.WriteString("\n")
+	}
+	out.WriteString("}\n")
 }
 
 // altGuard is one parsed `alt` clause's guard. For every kind except
@@ -3600,63 +3729,74 @@ func (t *transformer) transform(lo, hi int) []byte {
 			}
 			flushTo(t.off(tk.pos))
 			out.WriteString("{\n")
-			altCall := "altN(" + baseSrc + ")"
-			if condSrc != "" {
-				out.WriteString("bilGuards := make([]bool, len(" + baseSrc + "))\n")
-				out.WriteString("for " + varName + " := range " + baseSrc + " {\n")
-				out.WriteString("bilGuards[" + varName + "] = " + condSrc + "\n")
-				out.WriteString("}\n")
-				altCall = "altN(" + baseSrc + ", bilGuards...)"
-			}
-			out.WriteString("bilIdx, bilVal, bilOk := " + altCall + "\n")
-			// VAR is always freshly declared here, regardless of BIND's
-			// arrow kind: it's the construct's own per-dispatch replica
-			// index, with no occam equivalent and nothing outside this
-			// block that could have predeclared it. `chans[j]` in the
-			// source is what tells isReplicatedAlt which array to alt
-			// over, but that indexing expression itself never survives
-			// into the output (only the bare array does, as altN's
-			// argument), so from the emitted Go's point of view `j` is a
-			// fresh binding the body may or may not go on to reference —
-			// the extra `_ = j` unconditionally silences "declared and not
-			// used" rather than only when the body happens not to
-			// reference VAR (confirmed by hitting exactly that compile
-			// error on `alt j := range n { chans[j] -> v { println(v) } }`
-			// before this safety net existed).
-			if varName != "_" {
-				out.WriteString(varName + " := bilIdx\n")
-				out.WriteString("_ = " + varName + "\n")
+			// If EXPR is a compile-time constant, emitReplicatedAltConst
+			// unrolls this into a native `select` with no reflect involved
+			// at all (see its own and constArity's doc comments) — the
+			// common case, since a replicated alt's channel array is
+			// almost always itself sized off the same constant. Only when
+			// EXPR genuinely isn't knowable until runtime does this fall
+			// back to altN/reflect.Select below.
+			if n, constOK := t.constArity(exprLo, exprHi); constOK {
+				t.emitReplicatedAltConst(&out, n, varName, condSrc, baseSrc, bindVar, bindKind, okVar, hasOk, bodyLo, bodyHi)
 			} else {
-				out.WriteString("_ = bilIdx\n")
-			}
-			// BIND and OK, by contrast, follow BIND's own arrow: `:->`
-			// declares both fresh, `->` assigns into both (already
-			// declared outside) — same op for both, since Go can't mix
-			// `:=` and `=` in one statement.
-			op := "="
-			if bindKind == arrowDeclare {
-				op = ":="
-			}
-			bindTemp := func(target, temp string) {
-				if target == "_" {
-					out.WriteString("_ = " + temp + "\n")
-				} else {
-					out.WriteString(target + " " + op + " " + temp + "\n")
+				rangeSrc := strings.TrimSpace(string(t.src[t.off(t.toks[exprLo].pos):t.off(t.toks[exprHi].pos)]))
+				t.warnings = append(t.warnings, fmt.Sprintf("%s: replicated alt ranges over %q, not a compile-time constant -- falls back to reflect.Select (altN), which tinygo does not implement", t.file.Position(t.toks[exprLo].pos), rangeSrc))
+				altCall := "altN(" + baseSrc + ")"
+				if condSrc != "" {
+					out.WriteString("bilGuards := make([]bool, len(" + baseSrc + "))\n")
+					out.WriteString("for " + varName + " := range " + baseSrc + " {\n")
+					out.WriteString("bilGuards[" + varName + "] = " + condSrc + "\n")
+					out.WriteString("}\n")
+					altCall = "altN(" + baseSrc + ", bilGuards...)"
 				}
+				out.WriteString("bilIdx, bilVal, bilOk := " + altCall + "\n")
+				// VAR is always freshly declared here, regardless of BIND's
+				// arrow kind: it's the construct's own per-dispatch replica
+				// index, with no occam equivalent and nothing outside this
+				// block that could have predeclared it. `chans[j]` in the
+				// source is what tells isReplicatedAlt which array to alt
+				// over, but that indexing expression itself never survives
+				// into the output (only the bare array does, as altN's
+				// argument), so from the emitted Go's point of view `j` is a
+				// fresh binding the body may or may not go on to reference —
+				// the extra `_ = j` unconditionally silences "declared and not
+				// used" rather than only when the body happens not to
+				// reference VAR (confirmed by hitting exactly that compile
+				// error on `alt j := range n { chans[j] -> v { println(v) } }`
+				// before this safety net existed).
+				if varName != "_" {
+					out.WriteString(varName + " := bilIdx\n")
+					out.WriteString("_ = " + varName + "\n")
+				} else {
+					out.WriteString("_ = bilIdx\n")
+				}
+				// BIND and OK, by contrast, follow BIND's own arrow: `:->`
+				// declares both fresh, `->` assigns into both (already
+				// declared outside) — same op for both, since Go can't mix
+				// `:=` and `=` in one statement.
+				op := "="
+				if bindKind == arrowDeclare {
+					op = ":="
+				}
+				bindTemp := func(target, temp string) {
+					if target == "_" {
+						out.WriteString("_ = " + temp + "\n")
+					} else {
+						out.WriteString(target + " " + op + " " + temp + "\n")
+					}
+				}
+				bindTemp(bindVar, "bilVal")
+				if hasOk {
+					bindTemp(okVar, "bilOk")
+				} else {
+					out.WriteString("_ = bilOk\n")
+				}
+				out.Write(t.transform(bodyLo, bodyHi))
+				t.usedAltN = true
 			}
-			bindTemp(bindVar, "bilVal")
-			if hasOk {
-				bindTemp(okVar, "bilOk")
-			} else {
-				out.WriteString("_ = bilOk\n")
-			}
-			out.Write(t.transform(bodyLo, bodyHi))
 			out.WriteString("\n}")
 			cursor = t.off(t.toks[closeIdx].pos) + 1
 			i = closeIdx + 1
-			t.usedAltN = true
-			_ = exprLo
-			_ = exprHi
 
 		case tk.tok == token.IDENT && tk.lit == "stop" &&
 			i+1 < hi && (t.toks[i+1].tok == token.SEMICOLON || t.toks[i+1].tok == token.RBRACE):
@@ -4057,6 +4197,19 @@ func PlacementManifest(filename string, src []byte) ([]byte, error) {
 }
 
 func Transform(filename string, src []byte) ([]byte, error) {
+	out, _, err := transformSource(filename, src, "")
+	return out, err
+}
+
+// TransformWithWarnings behaves exactly like Transform, but also returns any
+// non-fatal diagnostics collected during the transform -- currently just a
+// notice (see constArity) for each replicated alt whose range expression
+// isn't a compile-time constant, so it still compiles to altN/reflect.Select
+// rather than a native `select`. Transform itself discards these (most
+// callers, including every test in this package, have no use for them);
+// this is for the CLI entry points (bil run/vet, the standalone bilc
+// command) that want to surface them to whoever's running the tool.
+func TransformWithWarnings(filename string, src []byte) ([]byte, []string, error) {
 	return transformSource(filename, src, "")
 }
 
@@ -4093,7 +4246,7 @@ func RoleBinaries(filename string, src []byte) (map[string][]byte, error) {
 		if _, done := roles[leaf.callee]; done {
 			continue
 		}
-		out, err := transformSource(filename, src, leaf.callee)
+		out, _, err := transformSource(filename, src, leaf.callee)
 		if err != nil {
 			return nil, err
 		}
@@ -4105,7 +4258,7 @@ func RoleBinaries(filename string, src []byte) (map[string][]byte, error) {
 // transformSource is Transform's real implementation, parametrized by
 // roleOverride (see the transformer field of the same name) -- Transform
 // itself is just this with roleOverride == "".
-func transformSource(filename string, src []byte, roleOverride string) ([]byte, error) {
+func transformSource(filename string, src []byte, roleOverride string) ([]byte, []string, error) {
 	// Absolute, not whatever filename came in as: the `//line` directives
 	// resync writes (see resync) end up in a Go file that go/parser reads
 	// from a different directory entirely (bil run's os.CreateTemp lands
@@ -4132,31 +4285,31 @@ func transformSource(filename string, src []byte, roleOverride string) ([]byte, 
 		}
 	}
 	if err := t.checkNoGoStatement(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := t.checkNoSelectStatement(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := t.checkNoPointerChannels(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := t.checkProcChanBothDirections(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := t.checkNoBufferedChannels(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := t.checkNoNestedPlacedPar(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := t.checkPlaceOnlyInsidePlacedPar(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := t.collectPlacedCallSites(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := t.checkPlacedVarsReadOnly(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	body := t.transform(0, len(t.toks)-1) // exclude EOF sentinel
 
@@ -4217,7 +4370,11 @@ func transformSource(filename string, src []byte, roleOverride string) ([]byte, 
 		full.WriteString(boolWordHelper)
 	}
 
-	return format.Source(full.Bytes())
+	out, err := format.Source(full.Bytes())
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, t.warnings, nil
 }
 
 // hasImport reports whether the source appears to already import path
