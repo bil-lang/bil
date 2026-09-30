@@ -13,6 +13,7 @@ import (
 	"go/scanner"
 	"go/token"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +26,32 @@ type tok struct {
 }
 
 const importSync = "\nimport \"sync\"\n"
+
+// bilDryRunScreenfHelper backs --dry-run's `bilink.Screenf(...)` calls,
+// textually rewritten by emitDryRunSpecializedProc into
+// bilDryRunScreenf(r, c, ...) -- the grid cell's own literal row/col,
+// known at transform time, baked in at each call site instead of read
+// from any shared variable, exactly like this same substitution already
+// does for bilink.Row()/Col()/ID()/NumRows()/NumCols(). That matters for
+// more than consistency: a package-level `bilink` value (or pointer)
+// referenced from multiple concurrent par branches -- every dry-run grid
+// cell calls into it -- is exactly the shared-mutable-state-across-a-
+// parallel pattern vet.Check's own safety rules exist to reject (and
+// rightly so in general; it just happens to not apply to the *real*
+// emulator/bilink package, since there only one role's code ever runs per
+// physical/compiled process, never several role bodies as concurrent
+// goroutines in one process the way dry-run's par() now does). A plain,
+// stateless top-level function, called with each cell's identity as
+// ordinary arguments, sidesteps that rule entirely rather than needing an
+// exception carved into it. No synchronization around the fmt.Printf
+// below: multiple cells' Screenf output can in principle interleave
+// mid-line, a cosmetic risk only, traded for not needing a mutex that
+// would reintroduce the same shared-state problem this design avoids.
+const bilDryRunScreenfHelper = `
+func bilDryRunScreenf(row, col int, format string, a ...any) {
+	fmt.Printf("[%d,%d] %s\n", row, col, fmt.Sprintf(format, a...))
+}
+`
 
 // parHelper is appended at the end of the file rather than injected after
 // the package clause: declaration order doesn't matter for top-level Go
@@ -292,6 +319,26 @@ type transformer struct {
 	// one role's call in main(), the same dead-code elimination that
 	// today's single switch statement (referencing every role) prevents.
 	roleOverride string
+
+	// dryRunGrid, when non-nil, changes what a `placed par` block compiles
+	// to: instead of the full multi-role switch (normal path) or a single
+	// collapsed role (roleOverride, used by RoleBinaries), every
+	// processor(...) clause's match/if-else conditions are resolved
+	// against every (r,c) cell of this rows*cols grid (see
+	// dryRunResolveLeaf in gridresolve.go), and one goroutine is spawned
+	// per resolved cell -- see emitPlacedParClausesDryRun. Set by
+	// TransformDryRun, for `bil run --dry-run`.
+	dryRunGrid *dryRunGrid
+
+	// extraTopLevelDecls accumulates Go source for top-level declarations
+	// that dry-run codegen needs but can't write in place (emitPlacedParClausesDryRun
+	// runs mid-statement, inside main()'s own body, where a top-level func
+	// declaration isn't legal Go) -- one specialized copy of each resolved
+	// leaf's proc body per grid cell it runs at (see
+	// emitPlacedParClausesDryRun). Spliced into the output once, after
+	// transform() returns, by transformSource -- the same place parHelper
+	// and friends are appended.
+	extraTopLevelDecls bytes.Buffer
 
 	// placedCallees is every distinct proc name placed-called anywhere in
 	// the file, populated as a side effect of collectPlacedCallSites's own
@@ -2546,7 +2593,15 @@ func (t *transformer) collectPlacedCallSites() error {
 		}
 		t.placedCallees[callee] = true
 
-		if len(aliases) > 0 {
+		// Dry-run never rewrites a placed channel reference to
+		// bilink.Send/Recv -- every channel parameter, placed or not,
+		// compiles to an ordinary Go channel op on the real local channel
+		// bound at the call site (see emitPlacedParClausesDryRun), so
+		// leaving t.placeAliases empty is exactly what's needed: every
+		// consumer (matchLinkReceive/matchLinkSend/resolvePlaceAlias)
+		// already falls through to plain channel-op codegen when no alias
+		// matches.
+		if len(aliases) > 0 && t.dryRunGrid == nil {
 			t.placeAliases = append(t.placeAliases, placeAliasScope{bodyLo: br.bodyLo, bodyHi: br.bodyHi, aliases: aliases})
 		}
 		return nil
@@ -3166,6 +3221,10 @@ func (t *transformer) parsePlacedParClauses(lo, hi int) (clauses []placedClause,
 // a token Go's automatic semicolon insertion fires after (like `)`)
 // silently breaks the emitted Go, whereas `{`/`:` are never such tokens.
 func (t *transformer) emitPlacedParClauses(out *bytes.Buffer, lo, hi int) {
+	if t.dryRunGrid != nil {
+		t.emitPlacedParClausesDryRun(out, lo, hi)
+		return
+	}
 	if t.roleOverride != "" {
 		clauses, _ := t.parsePlacedParClauses(lo, hi) // already validated; best-effort here
 		leaves, err := t.collectResolvedLeaves(lo, hi)
@@ -3244,6 +3303,252 @@ func (t *transformer) emitPlacedParClauses(out *bytes.Buffer, lo, hi int) {
 		out.WriteString("\n")
 	}
 	out.WriteString("}")
+}
+
+// emitPlacedParClausesDryRun is emitPlacedParClauses's --dry-run path (see
+// transformer.dryRunGrid): resolve every (r,c) cell of the grid against
+// this block's leaves (dryRunResolveLeaf), wire one local Go channel per
+// link-index edge the resolved cells actually place-bind
+// (dryRunMeshEdges), queue one specialized top-level copy of each resolved
+// leaf's proc body per cell it runs at (emitDryRunSpecializedProc, into
+// t.extraTopLevelDecls -- a top-level func decl isn't legal Go here, mid-
+// statement inside main()'s own body), and spawn one goroutine per cell
+// via the same par() runtime helper an ordinary `par{...}` already uses.
+func (t *transformer) emitPlacedParClausesDryRun(out *bytes.Buffer, lo, hi int) {
+	leaves, err := t.collectResolvedLeaves(lo, hi)
+	if err != nil {
+		panic(err)
+	}
+	rows, cols := t.dryRunGrid.rows, t.dryRunGrid.cols
+
+	// Resolving clause matches and if/else conditions at transform time
+	// (dryRunResolveLeaf, below) means their source text never appears
+	// literally in the emitted Go the way the normal switch/if-else path's
+	// does -- dropping every reference to whatever local var(s) they used
+	// (often one computed just before the placed-par block, e.g. `cols :=
+	// bilink.NumCols()` in example 20). Discard-reference them explicitly,
+	// the same way roleOverride's own branch above already has to for the
+	// same reason.
+	for _, leaf := range leaves {
+		switch {
+		case leaf.clause.idExpr != "" && leaf.clause.idExpr != "*":
+			fmt.Fprintf(out, "_ = (%s)\n", leaf.clause.idExpr)
+		case leaf.clause.rowExpr != "" || leaf.clause.colExpr != "":
+			if leaf.clause.rowExpr != "" && leaf.clause.rowExpr != "*" {
+				fmt.Fprintf(out, "_ = (%s)\n", leaf.clause.rowExpr)
+			}
+			if leaf.clause.colExpr != "" && leaf.clause.colExpr != "*" {
+				fmt.Fprintf(out, "_ = (%s)\n", leaf.clause.colExpr)
+			}
+		}
+		for _, c := range leaf.conditions {
+			fmt.Fprintf(out, "_ = (%s)\n", c.exprSrc)
+		}
+	}
+
+	type cell struct {
+		r, c int
+		leaf *resolvedLeaf
+	}
+	cells := make([]cell, 0, rows*cols)
+	for r := 0; r < rows; r++ {
+		for c := 0; c < cols; c++ {
+			leaf, err := dryRunResolveLeaf(leaves, r, c, rows, cols)
+			if err != nil {
+				panic(err)
+			}
+			cells = append(cells, cell{r: r, c: c, leaf: leaf})
+		}
+	}
+
+	// slotKey identifies one node's one directional half of one link
+	// slot -- e.g. (0,0), slot 1 (east), dirOut is a different channel
+	// from (0,0), slot 1, dirIn (see topology.go's own OUT/IN split):
+	// one physical, bidirectional link slot is always two independent
+	// half-duplex Go channels sharing an index, exactly like the real
+	// `place`-bound pair example 20's own doc comment describes.
+	type slotKey struct {
+		r, c, slot int
+		dir        chanDir
+	}
+	needed := map[slotKey]string{} // -> callee's declared element type
+	for _, cl := range cells {
+		br, found := t.funcBodyByName[cl.leaf.callee]
+		if !found {
+			panic(fmt.Sprintf("--dry-run: placed par calls undeclared proc %q", cl.leaf.callee))
+		}
+		names, dirs, elemTypes := t.paramNamesAndDirections(br.paramsLo, br.paramsHi)
+		for i, name := range names {
+			idxExpr, bound := cl.leaf.binds[name]
+			if !bound {
+				continue
+			}
+			slot, err := strconv.Atoi(strings.TrimSpace(idxExpr))
+			if err != nil {
+				panic(fmt.Sprintf("--dry-run: proc %q's link[%s] index must be a literal constant (0=north,1=east,2=south,3=west) for --dry-run", cl.leaf.callee, idxExpr))
+			}
+			elemType := elemTypes[i]
+			if elemType == "" {
+				elemType = "int32"
+			}
+			needed[slotKey{cl.r, cl.c, slot, dirs[i]}] = elemType
+		}
+	}
+
+	// Pair every mesh edge's OUT/IN endpoints against needed -- a direct
+	// port of buildTopology's own wire() pairing, minus socket allocation.
+	chanVar := map[slotKey]string{}
+	var chanDecls bytes.Buffer
+	chanN := 0
+	for _, e := range dryRunMeshEdges(rows, cols) {
+		outKey := slotKey{e.r1, e.c1, e.slot1, dirOut}
+		inKey := slotKey{e.r2, e.c2, e.slot2, dirIn}
+		outType, outOK := needed[outKey]
+		_, inOK := needed[inKey]
+		if !outOK || !inOK {
+			continue // neither/only one side of this mesh edge is used
+		}
+		if _, already := chanVar[outKey]; already {
+			continue
+		}
+		chanN++
+		name := fmt.Sprintf("__bilDryRunLink%d", chanN)
+		fmt.Fprintf(&chanDecls, "%s := make(chan %s)\n", name, outType)
+		chanVar[outKey] = name
+		chanVar[inKey] = name
+	}
+	// A needed slot with no matching mesh neighbour (the grid's edge, same
+	// as real hardware -- e.g. the last column of a row has no east
+	// neighbour to wire link[1] to) isn't an error: bilink.LinkWired lets
+	// a proc check this itself at runtime (see example 23-corebench.bil's
+	// sink/worker, the pattern this exists for) rather than assuming every
+	// place-bound parameter is always wired. wiredSlots records, per cell,
+	// which slots this cell actually got a channel for, so
+	// emitDryRunSpecializedProc can answer bilink.LinkWired(N) with a
+	// literal true/false; an unwired place-bound parameter itself is
+	// passed as a bare nil, exactly like the normal (non-dry-run) `place`
+	// rewrite already passes nil for every placed channel argument.
+	wiredSlots := map[[2]int]map[int]bool{}
+	for k := range chanVar {
+		cellKey := [2]int{k.r, k.c}
+		if wiredSlots[cellKey] == nil {
+			wiredSlots[cellKey] = map[int]bool{}
+		}
+		wiredSlots[cellKey][k.slot] = true
+	}
+
+	out.Write(chanDecls.Bytes())
+	out.WriteString("par(\n")
+	for _, cl := range cells {
+		br := t.funcBodyByName[cl.leaf.callee]
+		names, dirs, _ := t.paramNamesAndDirections(br.paramsLo, br.paramsHi)
+		_, _, argRanges, _, ok := t.parsePlacedCallLeaf(cl.leaf.leafLo, cl.leaf.leafHi)
+		if !ok {
+			panic(fmt.Sprintf("--dry-run: unsupported placed-par clause body shape for %q", cl.leaf.callee))
+		}
+		fnName := fmt.Sprintf("__bilDryRun_%s_%d_%d", cl.leaf.callee, cl.r, cl.c)
+		t.emitDryRunSpecializedProc(fnName, br, cl.r, cl.c, rows, cols, wiredSlots[[2]int{cl.r, cl.c}])
+
+		out.WriteString("func() {\n" + fnName + "(")
+		for idx, arg := range argRanges {
+			if idx > 0 {
+				out.WriteString(", ")
+			}
+			if idx < len(dirs) && dirs[idx] != dirNone {
+				slot, _ := strconv.Atoi(strings.TrimSpace(cl.leaf.binds[names[idx]]))
+				if name, wired := chanVar[slotKey{cl.r, cl.c, slot, dirs[idx]}]; wired {
+					out.WriteString(name)
+				} else {
+					out.WriteString("nil")
+				}
+			} else {
+				out.Write(t.src[t.off(t.toks[arg[0]].pos):t.off(t.toks[arg[1]].pos)])
+			}
+		}
+		out.WriteString(")\n},\n")
+	}
+	out.WriteString(")")
+}
+
+// emitDryRunSpecializedProc queues one specialized copy of a resolved
+// leaf's own proc body -- named fnName, with the same parameter list --
+// into t.extraTopLevelDecls: the exact Go text t.transform already
+// renders for that proc's body (ordinary channel ops throughout -- see the
+// t.placeAliases guard in collectPlacedCallSites), with every
+// bilink.Row()/Col()/ID() call replaced by this grid cell's own literal
+// r/c/id. That substitution is the one thing a wildcarded clause's proc
+// (placed-called once in source, but resolved to run at several grid
+// cells) genuinely needs a distinct copy per cell for -- Go has no per-
+// call way to make the *same* top-level func's bilink.Row() answer
+// differently each time it's invoked, short of goroutine-local state this
+// avoids needing entirely. bilink.NumRows()/NumCols()/Screenf() need no
+// such substitution -- see bilDryRunRuntimeHelper's own doc comment: grid
+// size is the same everywhere, and Screenf is just synchronized output.
+func (t *transformer) emitDryRunSpecializedProc(fnName string, br funcBodyRange, r, c, rows, cols int, wiredSlots map[int]bool) {
+	params := string(t.src[t.off(t.toks[br.paramsLo].pos):t.off(t.toks[br.paramsHi].pos)])
+	body := string(t.transform(br.bodyLo, br.bodyHi))
+	body = dryRunLinkWiredRe.ReplaceAllStringFunc(body, func(m string) string {
+		sub := dryRunLinkWiredRe.FindStringSubmatch(m)
+		slot, err := strconv.Atoi(strings.TrimSpace(sub[1]))
+		if err != nil {
+			panic(fmt.Sprintf("--dry-run: bilink.LinkWired(%s): index must be a literal constant", sub[1]))
+		}
+		return strconv.FormatBool(wiredSlots[slot])
+	})
+	body = dryRunBilinkReplacer(r, c, rows, cols).Replace(body)
+	fmt.Fprintf(&t.extraTopLevelDecls, "func %s(%s) {\n%s\n}\n", fnName, params, body)
+}
+
+// dryRunLinkWiredRe matches a literal-index bilink.LinkWired(N) call, for
+// emitDryRunSpecializedProc to replace with a literal true/false (whether
+// this grid cell's link[N] resolved to an actual channel -- see
+// emitPlacedParClausesDryRun's wiredSlots) before dryRunBilinkReplacer's
+// other, fixed-string substitutions run. A regexp rather than another
+// strings.Replacer entry since, unlike Row()/Col()/.../Screenf(, its
+// argument varies per call and needs capturing, not just a fixed prefix
+// swap.
+var dryRunLinkWiredRe = regexp.MustCompile(`bilink\.LinkWired\(\s*([^()]*)\s*\)`)
+
+// dryRunBilinkReplacer builds the literal-substitution rules
+// emitDryRunSpecializedProc applies to one resolved leaf's proc body,
+// standing in for the real emulator/bilink package this build never
+// imports (see TransformDryRun): bilink.Row()/Col()/ID() become this
+// grid cell's own literal r/c/id, bilink.NumRows()/NumCols() become the
+// grid's fixed literal size, and bilink.Screenf(...) becomes a call to
+// the plain, stateless bilDryRunScreenf helper with r/c as its first two
+// arguments -- see bilDryRunScreenfHelper's own doc comment for why a
+// shared bilink value can't be used for this instead. transformSource
+// also applies this, with r=c=0, to the rest of the file: every proc
+// placed-called from a wildcarded clause is still separately emitted at
+// top level under its original name (dead code in a dry-run build, since
+// main() only ever calls the specialized copies below), and that
+// original declaration's own bilink.* references need to resolve to
+// *something* for it to still compile -- the exact r/c values are moot
+// there, since the code never runs.
+func dryRunBilinkReplacer(r, c, rows, cols int) *strings.Replacer {
+	return strings.NewReplacer(
+		"bilink.Row()", strconv.Itoa(r),
+		"bilink.Col()", strconv.Itoa(c),
+		"bilink.ID()", strconv.Itoa(r*cols+c),
+		"bilink.NumRows()", strconv.Itoa(rows),
+		"bilink.NumCols()", strconv.Itoa(cols),
+		"bilink.Screenf(", fmt.Sprintf("bilDryRunScreenf(%d, %d, ", r, c),
+		// A placed proc idiomatically ends in `stop` ("never terminate") so
+		// that in the real deployment, where it's a whole physical
+		// process, that process doesn't exit -- see stop's own doc
+		// comment at its usual rewrite site. In dry-run, every grid cell
+		// is instead one goroutine joined by the same WaitGroup
+		// (emitPlacedParClausesDryRun's par(...) call): leaving stop as
+		// time.Sleep(1<<63-1) there would mean the goroutine, and hence
+		// the whole dry-run process, never exits even once every cell's
+		// own observable work (output, channel traffic) is long done. No
+		// code after a `stop` ever runs either way, so ending the
+		// goroutine outright is behaviorally the same substitution this
+		// replacer already makes for bilink.Row()/Col()/etc: the literal
+		// text bilc's normal `stop` rewrite always emits (see its own
+		// case in transform()), swapped for dry-run's own meaning of it.
+		"time.Sleep(1<<63 - 1)", "return",
+	)
 }
 
 // emitPlacedClauseBody mirrors collectPlacedCallSites's own leaf traversal
@@ -3637,6 +3942,29 @@ func (t *transformer) transform(lo, hi int) []byte {
 	for i < hi {
 		tk := t.toks[i]
 		switch {
+		case t.dryRunGrid != nil && (tk.tok == token.FUNC || (tk.tok == token.IDENT && tk.lit == "proc")) &&
+			i+2 < hi && t.toks[i+1].tok == token.IDENT && t.placedCallees[t.toks[i+1].lit] &&
+			t.toks[i+2].tok == token.LPAREN:
+			// A proc/func placed-called from this file's placed-par block
+			// is entirely superseded, in dry-run output, by one
+			// specialized copy per grid cell it resolves to
+			// (emitPlacedParClausesDryRun/emitDryRunSpecializedProc) --
+			// skip its own original declaration altogether rather than
+			// emitting it as unreachable dead code: nothing calls it, so
+			// there's no benefit to giving its own
+			// bilink.Row()/Col()/.../stop calls the same substitution
+			// treatment (dryRunBilinkReplacer) a real, reachable copy
+			// needs -- simpler to just not emit it at all. Shape already
+			// validated by collectPlacedCallSites/funcBodyByName before
+			// transform() ever runs (t.placedCallees is only populated
+			// from a successfully-parsed placed call site), so this
+			// trusts it rather than re-checking.
+			flushTo(t.off(tk.pos))
+			parenClose := matchParen(t.toks, i+2)
+			bodyClose := matchBrace(t.toks, parenClose+1)
+			cursor = t.off(t.toks[bodyClose].pos) + 1
+			i = bodyClose + 1
+
 		case tk.tok == token.IDENT && tk.lit == "proc":
 			flushTo(t.off(tk.pos))
 			out.WriteString("func")
@@ -4197,7 +4525,7 @@ func PlacementManifest(filename string, src []byte) ([]byte, error) {
 }
 
 func Transform(filename string, src []byte) ([]byte, error) {
-	out, _, err := transformSource(filename, src, "")
+	out, _, err := transformSource(filename, src, "", nil)
 	return out, err
 }
 
@@ -4210,7 +4538,20 @@ func Transform(filename string, src []byte) ([]byte, error) {
 // this is for the CLI entry points (bil run/vet, the standalone bilc
 // command) that want to surface them to whoever's running the tool.
 func TransformWithWarnings(filename string, src []byte) ([]byte, []string, error) {
-	return transformSource(filename, src, "")
+	return transformSource(filename, src, "", nil)
+}
+
+// TransformDryRun behaves like TransformWithWarnings, but for `bil run
+// --dry-run`: a `placed par` block (if any) compiles to one goroutine per
+// (r,c) cell of a rows*cols grid instead of a role-dispatch switch, with
+// `place`-bound channels wired to local Go channels instead of
+// bilink.Send/Recv, and bilink.Row()/Col()/NumRows()/NumCols()/ID()/
+// Screenf() backed by a small self-contained runtime shim instead of the
+// real emulator/bilink package -- see transformer.dryRunGrid and
+// emitPlacedParClausesDryRun. A file with no `placed par` block at all
+// transforms identically to TransformWithWarnings.
+func TransformDryRun(filename string, src []byte, rows, cols int) ([]byte, []string, error) {
+	return transformSource(filename, src, "", &dryRunGrid{rows: rows, cols: cols})
 }
 
 // RoleBinaries compiles filename's source once per distinct placed-par
@@ -4246,7 +4587,7 @@ func RoleBinaries(filename string, src []byte) (map[string][]byte, error) {
 		if _, done := roles[leaf.callee]; done {
 			continue
 		}
-		out, _, err := transformSource(filename, src, leaf.callee)
+		out, _, err := transformSource(filename, src, leaf.callee, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -4256,9 +4597,12 @@ func RoleBinaries(filename string, src []byte) (map[string][]byte, error) {
 }
 
 // transformSource is Transform's real implementation, parametrized by
-// roleOverride (see the transformer field of the same name) -- Transform
-// itself is just this with roleOverride == "".
-func transformSource(filename string, src []byte, roleOverride string) ([]byte, []string, error) {
+// roleOverride (see the transformer field of the same name) and
+// dryRunGrid (see TransformDryRun) -- Transform itself is just this with
+// roleOverride == "" and dryRunGrid == nil; the two are never both set
+// (RoleBinaries, the only roleOverride caller, has nothing to do with
+// --dry-run).
+func transformSource(filename string, src []byte, roleOverride string, dryRunGrid *dryRunGrid) (out []byte, warnings []string, err error) {
 	// Absolute, not whatever filename came in as: the `//line` directives
 	// resync writes (see resync) end up in a Go file that go/parser reads
 	// from a different directory entirely (bil run's os.CreateTemp lands
@@ -4275,6 +4619,25 @@ func transformSource(filename string, src []byte, roleOverride string) ([]byte, 
 	}
 	t := tokenize(filename, src)
 	t.roleOverride = roleOverride
+	t.dryRunGrid = dryRunGrid
+	// Every other panic reachable during transform() signals a bilc bug --
+	// an invariant collectPlacedCallSites/checkXXX above was supposed to
+	// have already ruled out, so the raw panic/stack trace is exactly the
+	// diagnostic a bilc developer wants. --dry-run's grid resolution
+	// (emitPlacedParClausesDryRun and friends) is different: an
+	// unresolvable cell or link, e.g. too small a -rows/-cols for this
+	// program's own processor(...) clauses, is a genuine, likely user
+	// mistake with no validation pass ahead of transform() to catch it
+	// first (unlike everything else placement-related) -- recovered here
+	// into the same clean error path every other failure in this function
+	// already returns through, rather than a raw panic dump.
+	if dryRunGrid != nil {
+		defer func() {
+			if r := recover(); r != nil {
+				out, warnings, err = nil, nil, fmt.Errorf("%v", r)
+			}
+		}()
+	}
 	t.buildFuncBodyIndex()
 	for _, tk := range t.toks {
 		if tk.tok == token.IDENT && tk.lit == "altN" {
@@ -4313,6 +4676,22 @@ func transformSource(filename string, src []byte, roleOverride string) ([]byte, 
 	}
 	body := t.transform(0, len(t.toks)-1) // exclude EOF sentinel
 
+	// bilink.NumRows()/NumCols() (unlike Row()/Col()/ID()/Screenf(), which
+	// only mean anything inside a placed proc's own body -- see
+	// dryRunBilinkReplacer) are the grid's fixed size, the same answer
+	// everywhere: safe, and occasionally necessary (example 20's own
+	// `cols := bilink.NumCols()` sits in main(), ahead of and read by the
+	// placed-par block's own clause-match text, not inside any proc body
+	// dryRunBilinkReplacer would otherwise reach), to substitute across
+	// the whole file rather than only inside specialized proc copies.
+	if t.dryRunGrid != nil && t.usedPlacement {
+		repl := strings.NewReplacer(
+			"bilink.NumRows()", strconv.Itoa(t.dryRunGrid.rows),
+			"bilink.NumCols()", strconv.Itoa(t.dryRunGrid.cols),
+		)
+		body = []byte(repl.Replace(string(body)))
+	}
+
 	// Inject `import "sync"` right after the package clause, and append the
 	// par helper at the end of the file (see parHelper's comment for why).
 	// pkgStart skips past whatever transform's first flushTo call resync'd
@@ -4343,7 +4722,20 @@ func transformSource(filename string, src []byte, roleOverride string) ([]byte, 
 	var full bytes.Buffer
 	full.Write(body[:pkgEnd])
 	full.WriteString(importSync)
-	if t.usedStop && !t.hasImport("time") {
+	// t.usedStop alone isn't reliable for dry-run: every `stop` inside a
+	// placed proc's body is substituted away from its usual
+	// time.Sleep(1<<63-1) rewrite (see dryRunBilinkReplacer and the
+	// skipped-original-declaration case in transform() above) by the time
+	// the output settles, even though t.usedStop was still set the moment
+	// transform() first walked past the keyword. Check what the assembled
+	// output actually still contains instead -- genuine, unrelated
+	// time.X(...) usage (e.g. a real time.Sleep(hopDelay) delay) still
+	// needs the import exactly as before.
+	needsTime := t.usedStop
+	if t.dryRunGrid != nil {
+		needsTime = bytes.Contains(body, []byte("time.")) || bytes.Contains(t.extraTopLevelDecls.Bytes(), []byte("time."))
+	}
+	if needsTime && !t.hasImport("time") {
 		full.WriteString("\nimport \"time\"\n")
 	}
 	if t.usedAltN && !t.hasImport("reflect") {
@@ -4352,10 +4744,22 @@ func transformSource(filename string, src []byte, roleOverride string) ([]byte, 
 	if t.usedLinkFloat && !t.hasImport("math") {
 		full.WriteString("\nimport \"math\"\n")
 	}
-	if (t.usedLink || t.usedPlacement) && !t.hasImport("emulator/bilink") {
+	if t.dryRunGrid != nil && t.usedPlacement && !t.hasImport("fmt") {
+		full.WriteString("\nimport \"fmt\"\n")
+	}
+	// Dry-run never imports the real emulator/bilink package: Row()/Col()/
+	// ID() are resolved to per-grid-cell literals at transform time
+	// (emitDryRunSpecializedProc) and NumRows()/NumCols()/Screenf() are
+	// backed by the self-contained bilDryRunRuntimeHelper shim appended
+	// below instead -- see TransformDryRun.
+	if t.dryRunGrid == nil && (t.usedLink || t.usedPlacement) && !t.hasImport("emulator/bilink") {
 		full.WriteString("\nimport \"emulator/bilink\"\n")
 	}
 	full.Write(body[pkgEnd:])
+	full.Write(t.extraTopLevelDecls.Bytes())
+	if t.dryRunGrid != nil && t.usedPlacement {
+		full.WriteString(bilDryRunScreenfHelper)
+	}
 	full.WriteString(parHelper)
 	full.WriteString(parForHelper)
 	full.WriteString(makeChansHelper)
@@ -4370,7 +4774,7 @@ func transformSource(filename string, src []byte, roleOverride string) ([]byte, 
 		full.WriteString(boolWordHelper)
 	}
 
-	out, err := format.Source(full.Bytes())
+	out, err = format.Source(full.Bytes())
 	if err != nil {
 		return nil, nil, err
 	}

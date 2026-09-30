@@ -27,7 +27,7 @@ func TestRunOK(t *testing.T) {
 			}
 
 			var out bytes.Buffer
-			if code := runCmd(src, true, &out, &out); code != 0 {
+			if code := runCmd(src, true, false, 0, 0, &out, &out); code != 0 {
 				t.Fatalf("runCmd exited %d, output:\n%s", code, out.String())
 			}
 			if out.String() != string(golden) {
@@ -47,7 +47,7 @@ func TestVetFail(t *testing.T) {
 
 	t.Run("run", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runCmd(src, true, &stdout, &stderr)
+		code := runCmd(src, true, false, 0, 0, &stdout, &stderr)
 		if code == 0 {
 			t.Fatal("runCmd(execute=true) returned 0, want non-zero")
 		}
@@ -61,7 +61,7 @@ func TestVetFail(t *testing.T) {
 
 	t.Run("vet", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runCmd(src, false, &stdout, &stderr)
+		code := runCmd(src, false, false, 0, 0, &stdout, &stderr)
 		if code == 0 {
 			t.Fatal("runCmd(execute=false) returned 0, want non-zero")
 		}
@@ -87,7 +87,7 @@ func TestPlacedProgramRedirectsToEmu(t *testing.T) {
 
 	t.Run("run", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runCmd(src, true, &stdout, &stderr)
+		code := runCmd(src, true, false, 0, 0, &stdout, &stderr)
 		if code == 0 {
 			t.Fatal("runCmd(execute=true) returned 0, want non-zero")
 		}
@@ -104,7 +104,7 @@ func TestPlacedProgramRedirectsToEmu(t *testing.T) {
 
 	t.Run("vet", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runCmd(src, false, &stdout, &stderr)
+		code := runCmd(src, false, false, 0, 0, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("runCmd(execute=false) = %d, want 0 (a valid placed program should now vet clean): stderr=%q", code, stderr.String())
 		}
@@ -130,7 +130,7 @@ func TestVetFailLineAfterAlt(t *testing.T) {
 	const wantSecondPos = "violation-after-alt.bil:24) — a channel may only be used for output in one component of a parallel"
 
 	var stdout, stderr bytes.Buffer
-	code := runCmd(src, false, &stdout, &stderr)
+	code := runCmd(src, false, false, 0, 0, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("runCmd(execute=false) returned 0, want non-zero")
 	}
@@ -154,7 +154,7 @@ func TestTypeErrorLineAfterAlt(t *testing.T) {
 	const wantSubstr = "type-error-after-alt.bil:17: cannot use \"not a number\""
 
 	var stdout, stderr bytes.Buffer
-	code := runCmd(src, true, &stdout, &stderr)
+	code := runCmd(src, true, false, 0, 0, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("runCmd(execute=true) returned 0, want non-zero")
 	}
@@ -179,7 +179,7 @@ func TestPanicLineAfterAlt(t *testing.T) {
 	const wantSubstr = "panic-after-alt.bil:18"
 
 	var stdout, stderr bytes.Buffer
-	code := runCmd(src, true, &stdout, &stderr)
+	code := runCmd(src, true, false, 0, 0, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("runCmd(execute=true) returned 0, want non-zero")
 	}
