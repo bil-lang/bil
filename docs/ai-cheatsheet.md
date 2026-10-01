@@ -1,6 +1,6 @@
 # Bil AI Cheatsheet
 
-_Paste this file's contents alone into an AI chat prompt when asking it to write Bil — it's written to stand on its own. Latest at [`ai-cheatsheet.md`](ai-cheatsheet.md)_
+_Paste this file's contents alone into an AI chat prompt when asking it to write Bil — it's written to stand on its own. Latest at [`ai-cheatsheet.md`](https://github.com/bil-lang/bil/edit/main/docs/ai-cheatsheet.md)._
 
 Bil's *base* language is Go — types, structs, generics, control flow, the standard library, all unchanged. But Bil's new keywords aren't invented: they're occam's own `PAR`/`SEQ`/`ALT`/`PROC`/`SKIP`/`STOP` vocabulary, kept almost verbatim (just lowercased, and `PRI ALT` kept as its own two tokens `pri alt`). If you already know occam, or CSP more generally, you already know Bil's concurrency model — map the keyword, adjust the punctuation to Go's, done. This cheatsheet pairs each new keyword, and each worked pattern, with its occam counterpart for exactly that reason. The 7 hard rules below aren't new invented restrictions either — they're occam's own compiler-enforced variable/channel usage rules (occam 2 Reference Manual, Appendix E: a free variable written in one process can't be read in another, a channel is unidirectional between exactly two processes, and so on), which Bil's static checker (`bil vet`) re-derives and enforces on top of Go.
 
