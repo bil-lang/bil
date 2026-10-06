@@ -75,7 +75,7 @@ func runCmd(src string, execute bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if roles != nil && execute {
-		fmt.Fprintf(stderr, "bil: %s uses `link[...]`/`placed par` — it targets the grid emulator, not this machine. Use `bil emu` instead of `bil run`.\n", src)
+		fmt.Fprintf(stderr, "bil: %s uses `link[...]`/`placed par` — it targets the grid emulator, not this machine. Use `bil emu` instead of `bil run` (`bil emu -target none` runs it locally on this machine).\n", src)
 		return 1
 	}
 

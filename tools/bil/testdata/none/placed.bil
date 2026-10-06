@@ -1,0 +1,22 @@
+package main
+
+proc left() {
+	println("left")
+}
+
+proc right() {
+	println("right")
+}
+
+func main() {
+	cols := 2
+	placed par {
+		processor(0, 0) {
+			left()
+		}
+		processor(*, *) {
+			right()
+		}
+	}
+	_ = cols
+}
