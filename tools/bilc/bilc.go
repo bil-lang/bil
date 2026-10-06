@@ -27,7 +27,7 @@ type tok struct {
 
 const importSync = "\nimport \"sync\"\n"
 
-// bilDryRunScreenfHelper backs --dry-run's `bilink.Screenf(...)` calls,
+// bilDryRunScreenfHelper backs none target's `bilink.Screenf(...)` calls,
 // textually rewritten by emitDryRunSpecializedProc into
 // bilDryRunScreenf(r, c, ...) -- the grid cell's own literal row/col,
 // known at transform time, baked in at each call site instead of read
@@ -327,7 +327,7 @@ type transformer struct {
 	// against every (r,c) cell of this rows*cols grid (see
 	// dryRunResolveLeaf in gridresolve.go), and one goroutine is spawned
 	// per resolved cell -- see emitPlacedParClausesDryRun. Set by
-	// TransformDryRun, for `bil run --dry-run`.
+	// TransformDryRun, for `bil emu -target none`.
 	dryRunGrid *dryRunGrid
 
 	// extraTopLevelDecls accumulates Go source for top-level declarations
@@ -3305,7 +3305,7 @@ func (t *transformer) emitPlacedParClauses(out *bytes.Buffer, lo, hi int) {
 	out.WriteString("}")
 }
 
-// emitPlacedParClausesDryRun is emitPlacedParClauses's --dry-run path (see
+// emitPlacedParClausesDryRun is emitPlacedParClauses's none target path (see
 // transformer.dryRunGrid): resolve every (r,c) cell of the grid against
 // this block's leaves (dryRunResolveLeaf), wire one local Go channel per
 // link-index edge the resolved cells actually place-bind
@@ -3371,11 +3371,12 @@ func (t *transformer) emitPlacedParClausesDryRun(out *bytes.Buffer, lo, hi int) 
 		r, c, slot int
 		dir        chanDir
 	}
-	needed := map[slotKey]string{} // -> callee's declared element type
+	needed := map[slotKey]string{}       // -> callee's declared element type
+	neededCallee := map[slotKey]string{} // -> callee name, for the LinkWired-aware check below
 	for _, cl := range cells {
 		br, found := t.funcBodyByName[cl.leaf.callee]
 		if !found {
-			panic(fmt.Sprintf("--dry-run: placed par calls undeclared proc %q", cl.leaf.callee))
+			panic(fmt.Sprintf("placed-par grid: placed par calls undeclared proc %q", cl.leaf.callee))
 		}
 		names, dirs, elemTypes := t.paramNamesAndDirections(br.paramsLo, br.paramsHi)
 		for i, name := range names {
@@ -3385,13 +3386,15 @@ func (t *transformer) emitPlacedParClausesDryRun(out *bytes.Buffer, lo, hi int) 
 			}
 			slot, err := strconv.Atoi(strings.TrimSpace(idxExpr))
 			if err != nil {
-				panic(fmt.Sprintf("--dry-run: proc %q's link[%s] index must be a literal constant (0=north,1=east,2=south,3=west) for --dry-run", cl.leaf.callee, idxExpr))
+				panic(fmt.Sprintf("placed-par grid: proc %q's link[%s] index must be a literal constant (0=north,1=east,2=south,3=west) ", cl.leaf.callee, idxExpr))
 			}
 			elemType := elemTypes[i]
 			if elemType == "" {
 				elemType = "int32"
 			}
-			needed[slotKey{cl.r, cl.c, slot, dirs[i]}] = elemType
+			key := slotKey{cl.r, cl.c, slot, dirs[i]}
+			needed[key] = elemType
+			neededCallee[key] = cl.leaf.callee
 		}
 	}
 
@@ -3437,6 +3440,36 @@ func (t *transformer) emitPlacedParClausesDryRun(out *bytes.Buffer, lo, hi int) 
 		wiredSlots[cellKey][k.slot] = true
 	}
 
+	// A needed slot that's still missing its channel after the pairing
+	// above is only legitimate for a proc that actually calls
+	// bilink.LinkWired itself -- i.e. one written to expect this (see
+	// example 23-corebench.bil's sink/worker). A proc with no such guard
+	// (the common case -- most placed procs just assume every one of
+	// their own declared channel parameters is wired, the same assumption
+	// the real grid launcher's own topology always satisfies for a big
+	// enough grid) would otherwise get a silent nil channel instead, and
+	// either block forever on it or -- if every other goroutine also
+	// finishes or blocks -- surface only as Go's own generic "all
+	// goroutines are asleep" deadlock panic, with no hint that the real
+	// cause was too small a -rows/-cols. Catching it here instead gives
+	// the same clear, specific error this always used to be.
+	calleeUsesLinkWired := map[string]bool{}
+	for k, callee := range neededCallee {
+		if _, ok := chanVar[k]; ok {
+			continue
+		}
+		aware, checked := calleeUsesLinkWired[callee]
+		if !checked {
+			br := t.funcBodyByName[callee]
+			body := t.src[t.off(t.toks[br.bodyLo].pos):t.off(t.toks[br.bodyHi].pos)]
+			aware = bytes.Contains(body, []byte("bilink.LinkWired("))
+			calleeUsesLinkWired[callee] = aware
+		}
+		if !aware {
+			panic(fmt.Sprintf("placed-par grid: node (%d,%d)'s link[%d] (proc %q) has no matching grid neighbour at rows=%d cols=%d -- try larger -rows/-cols, or guard its use with bilink.LinkWired(%d) if that's intentional", k.r, k.c, k.slot, callee, rows, cols, k.slot))
+		}
+	}
+
 	out.Write(chanDecls.Bytes())
 	out.WriteString("par(\n")
 	for _, cl := range cells {
@@ -3444,7 +3477,7 @@ func (t *transformer) emitPlacedParClausesDryRun(out *bytes.Buffer, lo, hi int) 
 		names, dirs, _ := t.paramNamesAndDirections(br.paramsLo, br.paramsHi)
 		_, _, argRanges, _, ok := t.parsePlacedCallLeaf(cl.leaf.leafLo, cl.leaf.leafHi)
 		if !ok {
-			panic(fmt.Sprintf("--dry-run: unsupported placed-par clause body shape for %q", cl.leaf.callee))
+			panic(fmt.Sprintf("placed-par grid: unsupported placed-par clause body shape for %q", cl.leaf.callee))
 		}
 		fnName := fmt.Sprintf("__bilDryRun_%s_%d_%d", cl.leaf.callee, cl.r, cl.c)
 		t.emitDryRunSpecializedProc(fnName, br, cl.r, cl.c, rows, cols, wiredSlots[[2]int{cl.r, cl.c}])
@@ -3491,7 +3524,7 @@ func (t *transformer) emitDryRunSpecializedProc(fnName string, br funcBodyRange,
 		sub := dryRunLinkWiredRe.FindStringSubmatch(m)
 		slot, err := strconv.Atoi(strings.TrimSpace(sub[1]))
 		if err != nil {
-			panic(fmt.Sprintf("--dry-run: bilink.LinkWired(%s): index must be a literal constant", sub[1]))
+			panic(fmt.Sprintf("placed-par grid: bilink.LinkWired(%s): index must be a literal constant", sub[1]))
 		}
 		return strconv.FormatBool(wiredSlots[slot])
 	})
@@ -4541,8 +4574,8 @@ func TransformWithWarnings(filename string, src []byte) ([]byte, []string, error
 	return transformSource(filename, src, "", nil)
 }
 
-// TransformDryRun behaves like TransformWithWarnings, but for `bil run
-// --dry-run`: a `placed par` block (if any) compiles to one goroutine per
+// TransformDryRun behaves like TransformWithWarnings, but for `bil emu -target none`:
+// a `placed par` block (if any) compiles to one goroutine per
 // (r,c) cell of a rows*cols grid instead of a role-dispatch switch, with
 // `place`-bound channels wired to local Go channels instead of
 // bilink.Send/Recv, and bilink.Row()/Col()/NumRows()/NumCols()/ID()/
@@ -4601,7 +4634,7 @@ func RoleBinaries(filename string, src []byte) (map[string][]byte, error) {
 // dryRunGrid (see TransformDryRun) -- Transform itself is just this with
 // roleOverride == "" and dryRunGrid == nil; the two are never both set
 // (RoleBinaries, the only roleOverride caller, has nothing to do with
-// --dry-run).
+// none target).
 func transformSource(filename string, src []byte, roleOverride string, dryRunGrid *dryRunGrid) (out []byte, warnings []string, err error) {
 	// Absolute, not whatever filename came in as: the `//line` directives
 	// resync writes (see resync) end up in a Go file that go/parser reads
@@ -4623,7 +4656,7 @@ func transformSource(filename string, src []byte, roleOverride string, dryRunGri
 	// Every other panic reachable during transform() signals a bilc bug --
 	// an invariant collectPlacedCallSites/checkXXX above was supposed to
 	// have already ruled out, so the raw panic/stack trace is exactly the
-	// diagnostic a bilc developer wants. --dry-run's grid resolution
+	// diagnostic a bilc developer wants. none target's grid resolution
 	// (emitPlacedParClausesDryRun and friends) is different: an
 	// unresolvable cell or link, e.g. too small a -rows/-cols for this
 	// program's own processor(...) clauses, is a genuine, likely user

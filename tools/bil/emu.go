@@ -28,7 +28,8 @@ func emuMain(args []string, stdout, stderr io.Writer) int {
 	// treats a single back-quoted substring as the flag's value-type name
 	// (e.g. would print "-cols placed par" instead of "-cols int").
 	target := fs.String("target", "wasm", "execution backend: wasm (browser/WASM grid, "+
-		"emulator/cmd/wasm) or multicore (native OS-process-per-core grid, emulator/cmd/multicore)")
+		"emulator/cmd/wasm), multicore (native OS-process-per-core grid, emulator/cmd/multicore), "+
+		"or none (no emulator: run locally on this machine, placed procs as goroutines, GOMAXPROCS=1)")
 	rows := fs.Int("rows", 0, "grid rows (0 = auto: 1 for a plain chan/proc/par program,"+
 		" or the smallest grid that gives every placed processor its own node"+
 		" for a placed-par program -- see -cols)")
@@ -39,7 +40,7 @@ func emuMain(args []string, stdout, stderr io.Writer) int {
 	addr := fs.String("addr", "localhost:8787", "wasm target only: address for the emulator's static file server to listen on")
 	open := fs.Bool("open", true, "wasm target only: open the default browser once the server is ready")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: bil emu [-target wasm|multicore] [-rows N] [-cols N] [-addr host:port] [-open] <file.bil>")
+		fmt.Fprintln(stderr, "usage: bil emu [-target wasm|multicore|none] [-rows N] [-cols N] [-addr host:port] [-open] <file.bil>")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -49,8 +50,8 @@ func emuMain(args []string, stdout, stderr io.Writer) int {
 		fs.Usage()
 		return 2
 	}
-	if *target != "wasm" && *target != "multicore" {
-		fmt.Fprintf(stderr, "bil emu: -target must be \"wasm\" or \"multicore\", got %q\n", *target)
+	if *target != "wasm" && *target != "multicore" && *target != "none" {
+		fmt.Fprintf(stderr, "bil emu: -target must be \"wasm\", \"multicore\" or \"none\", got %q\n", *target)
 		return 2
 	}
 	return emuCmd(fs.Arg(0), *target, *rows, *cols, *addr, *open, stdout, stderr)
@@ -74,6 +75,10 @@ func emuCmd(src, target string, rows, cols int, addr string, openBrowser bool, s
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	if target == "none" {
+		return runNoneTarget(src, in, rows, cols, stdout, stderr)
+	}
+
 	out, warnings, err := bilc.TransformWithWarnings(src, in)
 	if err != nil {
 		fmt.Fprintln(stderr, "transform error:", err)

@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// This file backs `bil run --dry-run`: resolving a `placed par` block's
+// This file backs `bil emu -target none`: resolving a `placed par` block's
 // leaves against a concrete -rows/-cols grid, entirely at bilc transform
 // time, with no real or emulated hardware involved. Both pieces here are
 // direct ports of logic that already exists twice in the sibling emulator
@@ -29,7 +29,7 @@ import (
 //     same plain-mesh (no torus) adjacency, just allocating a local Go
 //     channel per directed edge instead of a Unix-domain-socket path.
 
-// dryRunGrid selects --dry-run's grid size -- see transformer.dryRunGrid's
+// dryRunGrid selects none target's grid size -- see transformer.dryRunGrid's
 // own doc comment and TransformDryRun.
 type dryRunGrid struct {
 	rows, cols int
@@ -109,7 +109,7 @@ func dryRunResolveLeaf(leaves []resolvedLeaf, r, c, rows, cols int) (*resolvedLe
 			return l, nil
 		}
 	}
-	return nil, fmt.Errorf("--dry-run: no placed-par leaf matches (r=%d, c=%d) at rows=%d cols=%d -- try larger -rows/-cols, or add a `processor(*, *)` catch-all", r, c, rows, cols)
+	return nil, fmt.Errorf("placed-par grid: no placed-par leaf matches (r=%d, c=%d) at rows=%d cols=%d -- try larger -rows/-cols, or add a `processor(*, *)` catch-all", r, c, rows, cols)
 }
 
 func dryRunClauseMatches(cl placedClause, vars map[string]int, r, c int) (bool, error) {
@@ -154,7 +154,7 @@ func dryRunEvalBool(src string, vars map[string]int) (bool, error) {
 	case int:
 		return v != 0, nil
 	default:
-		return false, fmt.Errorf("--dry-run: %q did not evaluate to a boolean", src)
+		return false, fmt.Errorf("placed-par grid: %q did not evaluate to a boolean", src)
 	}
 }
 
@@ -167,9 +167,9 @@ func dryRunEvalInt(src string, vars map[string]int) (int, error) {
 	case int:
 		return v, nil
 	case bool:
-		return 0, fmt.Errorf("--dry-run: %q evaluated to a boolean, want an int", src)
+		return 0, fmt.Errorf("placed-par grid: %q evaluated to a boolean, want an int", src)
 	default:
-		return 0, fmt.Errorf("--dry-run: %q did not evaluate to an int", src)
+		return 0, fmt.Errorf("placed-par grid: %q did not evaluate to an int", src)
 	}
 }
 
@@ -186,7 +186,7 @@ func dryRunEvalExpr(src string, vars map[string]int) (any, error) {
 	}
 	p.skipWs()
 	if p.pos != len(p.src) {
-		return nil, fmt.Errorf("--dry-run: trailing input in %q", p.src)
+		return nil, fmt.Errorf("placed-par grid: trailing input in %q", p.src)
 	}
 	return v, nil
 }
@@ -218,7 +218,7 @@ func (p *dryRunExprParser) consume(tok string) bool {
 func dryRunAsInt(v any, src string) (int, error) {
 	n, ok := v.(int)
 	if !ok {
-		return 0, fmt.Errorf("--dry-run: expected an int in %q", src)
+		return 0, fmt.Errorf("placed-par grid: expected an int in %q", src)
 	}
 	return n, nil
 }
@@ -231,7 +231,7 @@ func (p *dryRunExprParser) parsePrimary() (any, error) {
 			return nil, err
 		}
 		if !p.consume(")") {
-			return nil, fmt.Errorf("--dry-run: expected ) in %q", p.src)
+			return nil, fmt.Errorf("placed-par grid: expected ) in %q", p.src)
 		}
 		return v, nil
 	}
@@ -239,7 +239,7 @@ func (p *dryRunExprParser) parsePrimary() (any, error) {
 		p.pos += len(m)
 		v, ok := p.vars[m]
 		if !ok {
-			return nil, fmt.Errorf("--dry-run: unknown identifier %q in %q", m, p.src)
+			return nil, fmt.Errorf("placed-par grid: unknown identifier %q in %q", m, p.src)
 		}
 		return v, nil
 	}
@@ -248,7 +248,7 @@ func (p *dryRunExprParser) parsePrimary() (any, error) {
 		n, _ := strconv.Atoi(m)
 		return n, nil
 	}
-	return nil, fmt.Errorf("--dry-run: unexpected token at %d in %q", p.pos, p.src)
+	return nil, fmt.Errorf("placed-par grid: unexpected token at %d in %q", p.pos, p.src)
 }
 
 func (p *dryRunExprParser) parseAdd() (any, error) {
@@ -339,6 +339,6 @@ func dryRunEvalBoolVal(v any, src string) (bool, error) {
 	case int:
 		return v != 0, nil
 	default:
-		return false, fmt.Errorf("--dry-run: unsupported value in %q", src)
+		return false, fmt.Errorf("placed-par grid: unsupported value in %q", src)
 	}
 }
